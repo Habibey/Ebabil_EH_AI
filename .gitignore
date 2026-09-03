@@ -1,2 +1,5 @@
 /models
 /data
+/gui
+__pycache__/
+*.pyc
