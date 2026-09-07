@@ -7,7 +7,18 @@ gibi ağır bağımlılıklar), sadece numpy -- iki ayrı süreç de hafif kalab
 import time
 
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
+
+try:
+    from numpy.lib.stride_tricks import sliding_window_view
+except ImportError:
+    # numpy < 1.20 (ör. Jetson'daki Python 3.6 için erişilebilir en yeni
+    # numpy 1.19.x) bu fonksiyonu içermiyor -- as_strided ile aynısını
+    # elle kuruyoruz, sliding_window_view zaten içeride bunu yapıyor.
+    def sliding_window_view(arr, window_shape):
+        window = window_shape[0] if isinstance(window_shape, tuple) else window_shape
+        shape = (arr.shape[0] - window + 1, window)
+        strides = (arr.strides[0], arr.strides[0])
+        return np.lib.stride_tricks.as_strided(arr, shape=shape, strides=strides)
 
 FFT_SIZE = 4096
 FREQ_BINS = 64  # arayüzün SPEC formatıyla eşleşmeli (mainwindow.h FREQ_BINS)
