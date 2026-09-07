@@ -34,9 +34,15 @@ import queue
 import sys
 import threading
 import time
+import wave
 
 import zmq
 import numpy as np
+
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None  # Kurulu değilse dinleme sesi sadece .wav'a yazılır, canlı çalınmaz.
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.join(_THIS_DIR, "..")
@@ -47,6 +53,7 @@ from rtlsdr import RtlSdr
 
 from predict import load_model_and_scalers, classify_iq_gated, CLASSES
 import sdr_common
+import demod
 
 # --- Tarama ayarları (ortam değişkeniyle değiştirilebilir) ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
@@ -158,7 +165,8 @@ def handle_save_command(sdr, tracker, args, selected_id=None):
     print(f"[+] Kaydedildi: {out_path} ({len(samples)} örnek, {len(samples) // 128} pencere üretilebilir)")
 
 
-def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std, selected_id=None):
+def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std, selected_id=None,
+                             son_siniflandirma=None):
     """Sınıflandırma için her zaman SEARCH_SAMPLE_RATE'e döner -- model,
     fine-tuning verisi bu hızda toplandığı için buna göre eğitildi. Dwell
     modundaysak bile geçici olarak hıza döner, sonraki dwell/arama adımı
@@ -188,9 +196,110 @@ def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_s
     pub_ai.send_string(f"AI,{tid},{analog_sayisal},{mod}")
     print(f"[>] {tid} ({freq_mhz:.3f} MHz) sınıflandırıldı: {mod} ({analog_sayisal}) - güven %{confidence:.1f}")
 
+    # Dinleme modu (bkz. handle_dinleme_capture) hangi demodülatörü
+    # kullanacağını bilsin diye son sınıflandırmayı hatırlıyoruz.
+    if son_siniflandirma is not None:
+        son_siniflandirma[tid] = (analog_sayisal, mod)
+
 
 def build_scan_freqs(start_mhz, stop_mhz):
     return sdr_common.build_scan_freqs(start_mhz, stop_mhz, SEARCH_STEP_MHZ)
+
+
+# --- Sinyal İzleme/Dinleme (KTR 4.3) -- gerçek AM/FM demodülasyonu ---
+DINLEME_BLOK_SURESI_S = 0.25  # her demodülasyon parçası bu kadar sürer
+DINLEME_KAYIT_DIZINI = os.path.join(_REPO_ROOT, "data", "dinleme_kayitlari")
+
+
+class DinlemeOturumu:
+    """Bir hedefi dinlerken açık kalan .wav dosyasını ve (varsa) canlı ses
+    çıkışını yönetir. Süreç boyunca en fazla bir oturum aktif olabilir --
+    yeni bir hedef dinlenmeye başlanınca öncekini kapatır."""
+
+    def __init__(self):
+        self.hedef_id = None
+        self.wav = None
+        self.stream = None
+
+    def baslat(self, hedef_id, freq_mhz):
+        self.durdur()
+        os.makedirs(DINLEME_KAYIT_DIZINI, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(DINLEME_KAYIT_DIZINI, f"{hedef_id}_{freq_mhz:.3f}MHz_{timestamp}.wav")
+        self.wav = wave.open(path, "wb")
+        self.wav.setnchannels(1)
+        self.wav.setsampwidth(2)  # 16-bit PCM
+        self.wav.setframerate(demod.AUDIO_SAMPLE_RATE)
+        self.hedef_id = hedef_id
+        if sd is not None:
+            try:
+                self.stream = sd.OutputStream(samplerate=demod.AUDIO_SAMPLE_RATE, channels=1, dtype="float32")
+                self.stream.start()
+            except Exception as e:
+                print(f"[!] Canlı ses çıkışı açılamadı (sadece .wav'a yazılacak): {e}")
+                self.stream = None
+        print(f"[*] Dinleme başladı: {hedef_id} -> {path}")
+        return path
+
+    def isle(self, audio):
+        if self.wav is not None:
+            pcm16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
+            self.wav.writeframes(pcm16.tobytes())
+        if self.stream is not None:
+            try:
+                self.stream.write(audio.reshape(-1, 1))
+            except Exception:
+                pass  # canli ses ara sira alt-calisma (underrun) verebilir, .wav kaydi etkilenmez
+
+    def durdur(self):
+        if self.wav is not None:
+            self.wav.close()
+            self.wav = None
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        self.hedef_id = None
+
+
+def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma):
+    """Bir dinleme döngüsü adımı: freq_mhz'e kilitlenip DINLEME_BLOK_SURESI_S
+    kadar örnek alır, hedefin son bilinen sınıflandırmasına göre demodüle
+    eder, aktif DinlemeOturumu'na yazar/çalar. Ayrıca aynı örneklerden bir
+    güç spektrumu döndürür ki İZLEME modundaki gibi waterfall akmaya devam etsin."""
+    sdr.center_freq = freq_mhz * 1e6
+    sdr.read_samples(THROWAWAY_SAMPLES)
+    n_samples = int(DINLEME_BLOK_SURESI_S * SEARCH_SAMPLE_RATE)
+    samples = sdr.read_samples(n_samples)
+
+    _, mod = son_siniflandirma.get(hedef_id, (None, None))
+    audio = demod.demod_for_modulation(samples, SEARCH_SAMPLE_RATE, mod)
+    dinleme.isle(audio)
+
+    return sdr_common.compute_power_spectrum(samples[:FFT_SIZE], freq_mhz, SEARCH_SAMPLE_RATE)
+
+
+def build_sys_fields(tracker, tid):
+    """tracker.known[tid]'den (zaten update() ile dolduruldu) tam SYS satırını
+    üretir -- klasik parametre çıkarımının hepsini taşır (KTR Tablo 8):
+    SYS,id,tespit,lat,lon,alt,freq,güç,bant_gen,frekans_sapması,gürültü_tabanı,SNR,süreklilik.
+    ARAMA ve İZLEME modlarının ikisi de aynı formatı kullansın diye ortak."""
+    info = tracker.known[tid]
+    snr_db = info.get("snr_db")
+    sapma_mhz = info.get("freq_sapmasi_mhz")
+    gurultu_db = info["power_db"] - snr_db if snr_db is not None else float("nan")
+    sureklilik = tracker.sureklilik_durumu(tid)
+    return [
+        "SYS", tid, "1", "nan", "nan", "0",
+        f"{info['freq_mhz']:.3f}", f"{info['power_db']:.2f}", f"{info['bandwidth_khz']:.1f}",
+        f"{sapma_mhz:.4f}" if sapma_mhz is not None else "nan",
+        f"{gurultu_db:.2f}" if snr_db is not None else "nan",
+        f"{snr_db:.2f}" if snr_db is not None else "nan",
+        sureklilik,
+    ]
 
 
 def pick_target(tracker, selected_id):
@@ -204,16 +313,24 @@ def pick_target(tracker, selected_id):
 
 
 def main():
+    # Varsayılan olarak tek makine (loopback) mimarisi. Bu betik başka bir
+    # makinede (örn. Jetson) çalışıp GUI ayrı bir makinede (örn. Windows PC)
+    # ise EBABIL_ZMQ_BIND_HOST=0.0.0.0 (PUB'ların dışarıdan erişilebilmesi
+    # için) ve EBABIL_GUI_HOST=<GUI'nin LAN IP'si> (GUI'nin bind ettiği komut
+    # kanalına ulaşmak için) ayarla.
+    zmq_bind_host = os.environ.get("EBABIL_ZMQ_BIND_HOST", "127.0.0.1")
+    gui_host = os.environ.get("EBABIL_GUI_HOST", "127.0.0.1")
+
     context = zmq.Context()
 
     pub = context.socket(zmq.PUB)
-    pub.bind("tcp://127.0.0.1:5555")
+    pub.bind(f"tcp://{zmq_bind_host}:5555")
 
     pub_ai = context.socket(zmq.PUB)
-    pub_ai.bind("tcp://127.0.0.1:5556")
+    pub_ai.bind(f"tcp://{zmq_bind_host}:5556")
 
     sub_cmd = context.socket(zmq.SUB)
-    sub_cmd.connect("tcp://127.0.0.1:5557")
+    sub_cmd.connect(f"tcp://{gui_host}:5557")
     sub_cmd.setsockopt_string(zmq.SUBSCRIBE, "")
 
     print("[*] Model yükleniyor...")
@@ -247,6 +364,14 @@ def main():
     # "hedef <id>" ile tekrar otomatik moda dönülebilir.
     selected_target_id = None
 
+    # --- Sinyal İzleme/Dinleme (KTR 4.3) durumu ---
+    # tid -> (analogSayisal, modulasyonTuru) -- handle_classify_request her
+    # sınıflandırmada günceller, handle_dinleme_capture hangi demodülatörü
+    # kullanacağını buradan öğrenir.
+    son_siniflandirma = {}
+    dinleme = DinlemeOturumu()
+    dinleme_hedef_id = None  # None = dinleme kapalı, aksi halde dinlenen hedefin id'si
+
     command_queue = queue.Queue()
     threading.Thread(target=stdin_command_reader, args=(command_queue,), daemon=True).start()
 
@@ -264,7 +389,8 @@ def main():
                 try:
                     msg = sub_cmd.recv_string(flags=zmq.NOBLOCK)
                     if msg == "SDR_VERISI_ISTEK":
-                        handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std, selected_target_id)
+                        handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std,
+                                                 selected_target_id, son_siniflandirma)
                         current_rate = None  # handle_classify_request hızı değiştirdi, döngü yeniden ayarlasın
                     elif msg.startswith("ET,BASLAT,") or msg.startswith("ET,DURDUR,"):
                         # Takım arkadaşımızın et_kontrol (Desktop/ET/) protokolüyle
@@ -296,6 +422,26 @@ def main():
                             command_queue.put(f"hedef {target_id}")
                         except ValueError:
                             print(f"[!] Geçersiz HEDEF_SEC komutu: {msg}")
+                    elif msg.startswith("DINLE_BASLAT|"):
+                        # DINLE_BASLAT|<hedef_id> -- gerçek AM/FM demodülasyonu
+                        # başlat (bkz. DinlemeOturumu). Hedef bilinmiyorsa yok sayılır.
+                        try:
+                            _, hedef_id = msg.split("|")
+                        except ValueError:
+                            print(f"[!] Geçersiz DINLE_BASLAT komutu: {msg}")
+                        else:
+                            if hedef_id not in tracker.known:
+                                print(f"[!] {hedef_id} bilinmiyor, dinleme başlatılamadı.")
+                            else:
+                                freq_mhz = tracker.known[hedef_id]["freq_mhz"]
+                                dinleme.baslat(hedef_id, freq_mhz)
+                                dinleme_hedef_id = hedef_id
+                                pub.send_string(f"DURUM,DINLEME_AKTIF,{freq_mhz:.3f}")
+                    elif msg == "DINLE_DURDUR":
+                        dinleme.durdur()
+                        dinleme_hedef_id = None
+                        current_rate = None
+                        pub.send_string("DURUM,TARIYOR")
                 except zmq.Again:
                     pass
 
@@ -392,7 +538,26 @@ def main():
                 if dwelling and not dwell_locked and (time.time() - dwell_started_at > DWELL_DURATION_S):
                     dwelling = False  # süre doldu, kısa bir arama turuna dön
 
-                if dwelling:
+                if dinleme_hedef_id is not None:
+                    # --- DİNLEME: gerçek AM/FM demodülasyonu -- taramaya ara verir,
+                    # sadece dinlenen hedefin frekansına kilitli kalır (bkz.
+                    # handle_dinleme_capture / DinlemeOturumu).
+                    if dinleme_hedef_id not in tracker.known:
+                        print(f"[!] {dinleme_hedef_id} artık bilinmiyor, dinleme durduruluyor.")
+                        dinleme.durdur()
+                        dinleme_hedef_id = None
+                        pub.send_string("DURUM,TARIYOR")
+                    else:
+                        if current_rate != SEARCH_SAMPLE_RATE:
+                            sdr.sample_rate = SEARCH_SAMPLE_RATE
+                            current_rate = SEARCH_SAMPLE_RATE
+                        dinleme_freq_mhz = tracker.known[dinleme_hedef_id]["freq_mhz"]
+                        binned_db, bin_freqs_mhz, fs_mhz = handle_dinleme_capture(
+                            sdr, dinleme, dinleme_hedef_id, dinleme_freq_mhz, son_siniflandirma)
+                        spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
+                        pub.send_string(",".join(spec_fields))
+
+                elif dwelling:
                     # --- İZLEME (dwell): hedefe kilitli, geniş bant, sabit merkez ---
                     if current_rate != DWELL_SAMPLE_RATE:
                         sdr.sample_rate = DWELL_SAMPLE_RATE
@@ -405,11 +570,11 @@ def main():
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
                     if peak is not None:
-                        freq_mhz, power_db, bandwidth_khz = peak
-                        tid = tracker.update(freq_mhz, power_db, bandwidth_khz)
-                        sys_fields = ["SYS", tid, "1", "nan", "nan", "0",
-                                      f"{freq_mhz:.3f}", f"{power_db:.2f}", f"{bandwidth_khz:.1f}"]
-                        pub.send_string(",".join(sys_fields))
+                        freq_mhz, power_db, bandwidth_khz, noise_floor_db = peak
+                        snr_db = power_db - noise_floor_db
+                        sapma_mhz = freq_mhz - dwell_center_mhz
+                        tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
+                        pub.send_string(",".join(build_sys_fields(tracker, tid)))
 
                 else:
                     # --- ARAMA: tüm bandı ince adımlarla dolaş ---
@@ -427,11 +592,11 @@ def main():
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
                     if peak is not None:
-                        freq_mhz, power_db, bandwidth_khz = peak
-                        tid = tracker.update(freq_mhz, power_db, bandwidth_khz)
-                        sys_fields = ["SYS", tid, "1", "nan", "nan", "0",
-                                      f"{freq_mhz:.3f}", f"{power_db:.2f}", f"{bandwidth_khz:.1f}"]
-                        pub.send_string(",".join(sys_fields))
+                        freq_mhz, power_db, bandwidth_khz, noise_floor_db = peak
+                        snr_db = power_db - noise_floor_db
+                        sapma_mhz = freq_mhz - center_mhz
+                        tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
+                        pub.send_string(",".join(build_sys_fields(tracker, tid)))
 
                     if scan_idx >= len(scan_freqs):
                         # Bir tam tur bitti -- operatör bir hedef SEÇTİYSE onun
@@ -456,6 +621,7 @@ def main():
                 time.sleep(0.5)
 
     finally:
+        dinleme.durdur()
         sdr.close()
 
 

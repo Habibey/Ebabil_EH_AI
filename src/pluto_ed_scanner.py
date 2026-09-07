@@ -215,10 +215,17 @@ def main():
 
                 peak = sdr_common.detect_peak(binned_db, bin_freqs_mhz)
                 if peak is not None:
-                    freq_mhz, power_db, bandwidth_khz = peak
-                    tid = tracker.update(freq_mhz, power_db, bandwidth_khz)
-                    sys_fields = ["SYS", tid, "1", "nan", "nan", "0",
-                                  f"{freq_mhz:.3f}", f"{power_db:.2f}", f"{bandwidth_khz:.1f}"]
+                    freq_mhz, power_db, bandwidth_khz, noise_floor_db = peak
+                    snr_db = power_db - noise_floor_db
+                    sapma_mhz = freq_mhz - spec_center
+                    tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
+                    info = tracker.known[tid]
+                    sureklilik = tracker.sureklilik_durumu(tid)
+                    sys_fields = [
+                        "SYS", tid, "1", "nan", "nan", "0",
+                        f"{info['freq_mhz']:.3f}", f"{info['power_db']:.2f}", f"{info['bandwidth_khz']:.1f}",
+                        f"{sapma_mhz:.4f}", f"{power_db - snr_db:.2f}", f"{snr_db:.2f}", sureklilik,
+                    ]
                     pub.send_string(",".join(sys_fields))
 
                 if not dwelling and scan_idx >= len(scan_freqs):
