@@ -1,8 +1,18 @@
 import zmq
 import numpy as np
-import tensorflow as tf
 import os
 import random
+
+# Jetson gibi tam TensorFlow'un (CUDA/cuDNN/Docker) kurulamadığı zayıf
+# donanımlarda tensorflow paketi hiç yok -- bu durumda tflite_runtime ile
+# devam ediyoruz (bkz. _TFLiteModel), sadece inference yapıyoruz zaten,
+# eğitim gerekmiyor.
+try:
+    import tensorflow as tf
+    _HAS_TF = True
+except ImportError:
+    tf = None
+    _HAS_TF = False
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.join(_THIS_DIR, "..")
@@ -28,6 +38,32 @@ def iq_to_v5_features(I, Q):
     return np.stack([I, Q, amplitude, phase_sin, phase_cos, inst_freq, amp_diff], axis=1)  # (128, 7)
 
 
+class _TFLiteModel:
+    """tensorflow paketi yoksa tflite_runtime ile aynı model.predict(x, verbose=0)
+    arayüzünü sağlar -- classify_iq bu farkı hiç bilmeden çalışır. tools/dataset/
+    convert_to_tflite.py ile üretilen .tflite dosyasını bekler (bkz. o dosya)."""
+
+    def __init__(self, tflite_path):
+        if not os.path.exists(tflite_path):
+            raise FileNotFoundError(
+                f"TFLite model bulunamadı: {tflite_path} -- önce Windows PC'de "
+                "tools/dataset/convert_to_tflite.py çalıştırıp .tflite dosyasını buraya taşı."
+            )
+        try:
+            from tflite_runtime.interpreter import Interpreter
+        except ImportError:
+            from tensorflow.lite.python.interpreter import Interpreter
+        self._interpreter = Interpreter(model_path=tflite_path)
+        self._interpreter.allocate_tensors()
+        self._input_index = self._interpreter.get_input_details()[0]["index"]
+        self._output_index = self._interpreter.get_output_details()[0]["index"]
+
+    def predict(self, x, verbose=0):
+        self._interpreter.set_tensor(self._input_index, x.astype(np.float32))
+        self._interpreter.invoke()
+        return self._interpreter.get_tensor(self._output_index)
+
+
 def load_model_and_scalers():
     """Modeli ve eğitimde kullanılan normalizasyon istatistiklerini yükler.
     streamer.py (gerçek SDR ile) ve bu dosyanın kendi sahte-IQ modu tarafından
@@ -36,14 +72,19 @@ def load_model_and_scalers():
     # tools/dataset/finetune.py) -- gerçek veri doğruluğunu %7.1 -> %35.7'ye
     # çıkardı. Orijinal sentetik-veri modeli (teknofest_model_v5_best.keras)
     # hâlâ diskte duruyor, gerekirse buradaki dosya adını ona geri çevirebilirsin.
-    model_path = os.path.join(_REPO_ROOT, "models", "teknofest_model_v5_finetuned.keras")
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model bulunamadı: {model_path}")
-
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-    model = tf.keras.models.load_model(model_path)
     feature_mean = np.load(os.path.join(_REPO_ROOT, "scalers", "v5_feature_mean.npy"))
     feature_std = np.load(os.path.join(_REPO_ROOT, "scalers", "v5_feature_std.npy"))
+
+    if _HAS_TF:
+        model_path = os.path.join(_REPO_ROOT, "models", "teknofest_model_v5_finetuned.keras")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model bulunamadı: {model_path}")
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+        model = tf.keras.models.load_model(model_path)
+    else:
+        tflite_path = os.path.join(_REPO_ROOT, "models", "teknofest_model_v5_finetuned.tflite")
+        model = _TFLiteModel(tflite_path)
+
     return model, feature_mean, feature_std
 
 
