@@ -47,7 +47,10 @@ except Exception:
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.join(_THIS_DIR, "..")
 sys.path.insert(0, _THIS_DIR)
-os.add_dll_directory(os.path.join(_REPO_ROOT, "tools", "rtlsdr"))
+if sys.platform == "win32":
+    # librtlsdr.dll'i bulmak için -- Linux/Jetson'da paket zaten sistem
+    # kütüphanesini (librtlsdr-dev) kullanıyor, buna gerek yok.
+    os.add_dll_directory(os.path.join(_REPO_ROOT, "tools", "rtlsdr"))
 
 from rtlsdr import RtlSdr
 
