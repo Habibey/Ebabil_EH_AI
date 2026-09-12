@@ -45,9 +45,11 @@ VAL_FRACTION = 0.2  # her dosyanın SON %20'si -- zaman bazlı, sızıntıyı az
 
 # Train pencereleri için augmentasyon: her pencereden 1 temiz (orijinal, gerçek
 # kanal gürültüsüyle) + bu kadar gürültü-enjekte edilmiş varyant üretilir.
-# Bellek riski nedeniyle düşük tutuldu (bkz. eski STRIDE=64 MemoryError'ı) --
-# RAM yeterliyse 2-3'e çıkarılabilir.
-AUGMENT_NOISY_COPIES = 1
+# 0 yapıldı (09.09.2026) -- artık pluto_seed_capture.py ile 4 farklı GERÇEK SNR
+# seviyesinde (5 oturum/sınıf) veri topladık, yapay AWGN'e eskisi kadar ihtiyaç
+# yok; ayrıca 5 kat veri + augment ikiye katlayınca bellek yetmiyordu
+# (~5.74GB'lık tek dizi MemoryError verdi, 16GB RAM'in sadece 7.6GB'ı boştu).
+AUGMENT_NOISY_COPIES = 0
 AUGMENT_SNR_DB_CHOICES = [-15, -10, -5, 0, 5, 10, 15, 20]
 
 CAPTURES_DIR = os.path.join(_REPO_ROOT, "data", "real_captures")
