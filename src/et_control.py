@@ -470,45 +470,56 @@ def main():
                 time.sleep(0.05)
                 continue
 
-            if msg.startswith("ET,BASLAT,"):
-                # ET,BASLAT,<görev_kodu>,<f1[;f2;f3]>,<tip> -- tip TEKLI/COKLU/BARAJ
-                parts = msg.split(",")
-                if len(parts) != 5:
-                    print(f"[-] Beklenmeyen ET,BASLAT formatı: {msg}")
-                    continue
-                _, _, gorev_kodu, freq_field, tip = parts
-                try:
-                    freqs_mhz = [float(f) for f in freq_field.split(";") if f]
-                except ValueError:
-                    print(f"[-] Geçersiz frekans alanı: {freq_field}")
-                    continue
-                handle_baslat(tx, gorev_kodu, freqs_mhz, tip)
+            try:
+                if msg.startswith("ET,BASLAT,"):
+                    # ET,BASLAT,<görev_kodu>,<f1[;f2;f3]>,<tip> -- tip TEKLI/COKLU/BARAJ
+                    parts = msg.split(",")
+                    if len(parts) != 5:
+                        print(f"[-] Beklenmeyen ET,BASLAT formatı: {msg}")
+                        continue
+                    _, _, gorev_kodu, freq_field, tip = parts
+                    try:
+                        freqs_mhz = [float(f) for f in freq_field.split(";") if f]
+                    except ValueError:
+                        print(f"[-] Geçersiz frekans alanı: {freq_field}")
+                        continue
+                    handle_baslat(tx, gorev_kodu, freqs_mhz, tip)
 
-            elif msg.startswith("ET,DURDUR,"):
-                gorev_kodu = msg.split(",", 2)[2]
-                tx.stop(gorev_kodu)
+                elif msg.startswith("ET,DURDUR,"):
+                    gorev_kodu = msg.split(",", 2)[2]
+                    tx.stop(gorev_kodu)
 
-            elif msg.startswith("ALDATMA_KAYNAK|"):
-                # ALDATMA_KAYNAK|<tur>|<deger> -- tur: KAYIT_TEKRAR (deger=dosya
-                # adı, data/aldatma_sesleri/ içinde) | PIPER_TTS (deger=metin).
-                # maxsplit=2 ile metnin içindeki olası "|" karakterleri korunur.
-                parts = msg.split("|", 2)
-                if len(parts) != 3:
-                    print(f"[-] Geçersiz ALDATMA_KAYNAK komutu: {msg}")
-                    continue
-                _, kaynak_tur, kaynak_deger = parts
-                set_aldatma_kaynak(kaynak_tur, kaynak_deger)
+                elif msg.startswith("ALDATMA_KAYNAK|"):
+                    # ALDATMA_KAYNAK|<tur>|<deger> -- tur: KAYIT_TEKRAR (deger=dosya
+                    # adı, data/aldatma_sesleri/ içinde) | PIPER_TTS (deger=metin).
+                    # maxsplit=2 ile metnin içindeki olası "|" karakterleri korunur.
+                    parts = msg.split("|", 2)
+                    if len(parts) != 3:
+                        print(f"[-] Geçersiz ALDATMA_KAYNAK komutu: {msg}")
+                        continue
+                    _, kaynak_tur, kaynak_deger = parts
+                    set_aldatma_kaynak(kaynak_tur, kaynak_deger)
 
-            elif msg.startswith("SET_POWER "):
-                try:
-                    dbm = float(msg.split(" ", 1)[1])
-                except ValueError:
-                    print(f"[-] Geçersiz SET_POWER değeri: {msg}")
-                    continue
-                tx.set_gain(dbm)
+                elif msg.startswith("SET_POWER "):
+                    try:
+                        dbm = float(msg.split(" ", 1)[1])
+                    except ValueError:
+                        print(f"[-] Geçersiz SET_POWER değeri: {msg}")
+                        continue
+                    tx.set_gain(dbm)
 
-            # SDR_VERISI_ISTEK, BANT_AYARLA|, FREKANS_KILITLE| -- bunlar streamer.py'nin
-            # işi, burada görmezden geliniyor.
+                # SDR_VERISI_ISTEK, BANT_AYARLA|, FREKANS_KILITLE| -- bunlar streamer.py'nin
+                # işi, burada görmezden geliniyor.
+
+            except Exception as e:
+                # Pluto'ya giden bir IIO/ağ komutu ara sıra bağlantı hatası
+                # (ör. ConnectionResetError [Errno 10054]) verebiliyor --
+                # streamer.py/pluto_ed_scanner.py'deki gibi burada da tek bir
+                # hata tüm süreci öldürmesin, loglayıp devam edilsin. Sahada
+                # defalarca gözlemlendi: bu olmadan operatör her seferinde
+                # süreci elle yeniden başlatmak zorunda kalıyordu.
+                print(f"[!] Komut işlenirken hata (devam ediliyor): {e}")
+                time.sleep(0.2)
 
     except KeyboardInterrupt:
         pass
