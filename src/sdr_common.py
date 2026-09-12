@@ -153,6 +153,24 @@ class TargetTracker:
             return None
         return max(self.known, key=lambda tid: self.known[tid]["last_seen"])
 
+    def most_powerful(self, max_age_s=None):
+        """Son max_age_s içinde görülenler arasında güç (power_db) en yüksek
+        olanı döndürür -- most_recent()'ın aksine "en son görülen" değil
+        "en baskın sinyal" seçer. Otomatik hedef kilitleme (kimse manuel
+        seçim yapmadıysa) için: zayıf/aralıklı gürültü kırıntıları arasında
+        gerçek/güçlü hedefi önceliklendirir (bkz. sahada gözlemlenen sorun --
+        342 tespitlik güçlü bir hedef varken sistem 3-5 tespitlik gürültü
+        kırıntılarına da eşit öncelik veriyordu)."""
+        if not self.known:
+            return None
+        if max_age_s is None:
+            max_age_s = SUREKLILIK_KAYIP_ESIK_S
+        now = time.time()
+        adaylar = {tid: info for tid, info in self.known.items() if now - info["last_seen"] <= max_age_s}
+        if not adaylar:
+            return None
+        return max(adaylar, key=lambda tid: adaylar[tid]["power_db"])
+
     def sureklilik_durumu(self, tid):
         """KTR Tablo 8 "Sinyal Süreklilik Durumu" -- sürekli/aralıklı/kaybolmuş
         (paketli, tek taramadan ayırt edilemediği için ayrı bir kategori değil,

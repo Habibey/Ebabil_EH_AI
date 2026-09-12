@@ -212,17 +212,54 @@ def build_scan_freqs(start_mhz, stop_mhz):
 # --- Sinyal İzleme/Dinleme (KTR 4.3) -- gerçek AM/FM demodülasyonu ---
 DINLEME_BLOK_SURESI_S = 0.25  # her demodülasyon parçası bu kadar sürer
 DINLEME_KAYIT_DIZINI = os.path.join(_REPO_ROOT, "data", "dinleme_kayitlari")
+IQ_OVERLAP_SAMPLES = 1024  # ~4ms @ 250 kSPS -- parça sınırı sürekliliği için (bkz. DinlemeOturumu.demodle)
+# Boşsa (varsayılan) AI sınıflandırmasına güvenilir; "WBFM" gibi bir değer
+# verilirse sınıflandırma yok sayılıp DİNLE hep o tiple demodüle eder --
+# sınıflandırma kararsızsa (bkz. handle_dinleme_capture) sahada hızlı çözüm.
+DINLEME_MOD_ZORUNLU = os.environ.get("EBABIL_DINLEME_MOD", "")
 
 
 class DinlemeOturumu:
     """Bir hedefi dinlerken açık kalan .wav dosyasını ve (varsa) canlı ses
     çıkışını yönetir. Süreç boyunca en fazla bir oturum aktif olabilir --
-    yeni bir hedef dinlenmeye başlanınca öncekini kapatır."""
+    yeni bir hedef dinlenmeye başlanınca öncekini kapatır.
+
+    Ses çalma sd.OutputStream'in CALLBACK modunda -- PortAudio kendi ayrı
+    gerçek-zamanlı thread'inde çalışıp sabit hızda veri istiyor. RF yakalama
+    (handle_dinleme_capture, ana döngüde) düzensiz aralıklarla tamamlanabiliyor
+    -- isle() artık bloklayan bir write() YAPMIYOR, üretilen parçayı sadece
+    bir kuyruğa atıyor (hızlı, hiç beklemiyor). Callback bu kuyruktan çeker;
+    kuyruk yetişemezse (RF yakalama gecikirse) kesik/bozuk ses yerine kısa
+    bir sessizlikle devam eder -- çok daha pürüzsüz."""
 
     def __init__(self):
         self.hedef_id = None
         self.wav = None
         self.stream = None
+        self._audio_queue = None
+        self._leftover = np.zeros(0, dtype=np.float32)
+        # Her parça bağımsız demodüle edilince (faz farkı + yeniden-örnekleme
+        # filtresi her seferinde sıfırdan başlayınca) parça sınırında küçük
+        # bir "tık" oluşuyordu -- bir önceki parçanın son birkaç bin ham
+        # örneğini burada tutup bir sonrakinin başına ekliyoruz (bkz.
+        # demodle()), süreklilik sağlanıyor.
+        self._iq_overlap = np.zeros(0, dtype=np.complex64)
+
+    def _audio_callback(self, outdata, frames, time_info, status):
+        buf = self._leftover
+        while len(buf) < frames:
+            try:
+                chunk = self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            buf = np.concatenate([buf, chunk])
+        if len(buf) >= frames:
+            outdata[:, 0] = buf[:frames]
+            self._leftover = buf[frames:]
+        else:
+            outdata[:len(buf), 0] = buf
+            outdata[len(buf):, 0] = 0.0  # RF yakalama yetişemedi -- kesinti yerine sessizlik
+            self._leftover = np.zeros(0, dtype=np.float32)
 
     def baslat(self, hedef_id, freq_mhz):
         self.durdur()
@@ -234,9 +271,14 @@ class DinlemeOturumu:
         self.wav.setsampwidth(2)  # 16-bit PCM
         self.wav.setframerate(demod.AUDIO_SAMPLE_RATE)
         self.hedef_id = hedef_id
+        self._audio_queue = queue.Queue()
+        self._leftover = np.zeros(0, dtype=np.float32)
+        self._iq_overlap = np.zeros(0, dtype=np.complex64)
         if sd is not None:
             try:
-                self.stream = sd.OutputStream(samplerate=demod.AUDIO_SAMPLE_RATE, channels=1, dtype="float32")
+                self.stream = sd.OutputStream(
+                    samplerate=demod.AUDIO_SAMPLE_RATE, channels=1, dtype="float32",
+                    callback=self._audio_callback)
                 self.stream.start()
             except Exception as e:
                 print(f"[!] Canlı ses çıkışı açılamadı (sadece .wav'a yazılacak): {e}")
@@ -248,11 +290,26 @@ class DinlemeOturumu:
         if self.wav is not None:
             pcm16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
             self.wav.writeframes(pcm16.tobytes())
-        if self.stream is not None:
-            try:
-                self.stream.write(audio.reshape(-1, 1))
-            except Exception:
-                pass  # canli ses ara sira alt-calisma (underrun) verebilir, .wav kaydi etkilenmez
+        if self._audio_queue is not None:
+            self._audio_queue.put(audio.astype(np.float32))
+
+    def demodle(self, raw_samples, fs_in, modulasyon_turu):
+        """Yeni yakalanan ham örnekleri, bir önceki parçanın kuyruğuyla
+        (self._iq_overlap) birleştirip demodüle eder -- FM faz farkı ve
+        yeniden-örnekleme filtresi böylece parça sınırında sıfırdan
+        başlamıyor. Örtüşmeye karşılık gelen ses kısmı (zaten bir önceki
+        parçada üretilip çalınmıştı) çıktıdan kırpılıp atılır."""
+        overlap_n = len(self._iq_overlap)
+        combined = np.concatenate([self._iq_overlap, raw_samples]) if overlap_n else raw_samples
+        audio = demod.demod_for_modulation(combined, fs_in, modulasyon_turu)
+
+        if overlap_n:
+            drop_n = int(round(overlap_n / fs_in * demod.AUDIO_SAMPLE_RATE))
+            audio = audio[drop_n:]
+
+        overlap_len = min(IQ_OVERLAP_SAMPLES, len(raw_samples))
+        self._iq_overlap = raw_samples[-overlap_len:].copy()
+        return audio
 
     def durdur(self):
         if self.wav is not None:
@@ -265,6 +322,7 @@ class DinlemeOturumu:
             except Exception:
                 pass
             self.stream = None
+        self._audio_queue = None
         self.hedef_id = None
 
 
@@ -279,7 +337,14 @@ def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma):
     samples = sdr.read_samples(n_samples)
 
     _, mod = son_siniflandirma.get(hedef_id, (None, None))
-    audio = demod.demod_for_modulation(samples, SEARCH_SAMPLE_RATE, mod)
+    if DINLEME_MOD_ZORUNLU:
+        # AI sınıflandırması güvenilmezse (donanım kararsızlığı vb. nedenle
+        # "Belirsiz" ile gidip geliyorsa) yanlış demodülatöre (AM zarf) düşüp
+        # sesin bozuk/anlaşılmaz çıkmasına yol açabiliyordu -- bu ortam
+        # değişkeniyle sabit bir tipe zorlanabilir (pluto_ed_scanner.py'deki
+        # aynı çözümle tutarlı).
+        mod = DINLEME_MOD_ZORUNLU
+    audio = dinleme.demodle(samples, SEARCH_SAMPLE_RATE, mod)
     dinleme.isle(audio)
 
     return sdr_common.compute_power_spectrum(samples[:FFT_SIZE], freq_mhz, SEARCH_SAMPLE_RATE)
@@ -308,11 +373,14 @@ def build_sys_fields(tracker, tid):
 def pick_target(tracker, selected_id):
     """Operatör 'hedef <id>' komutuyla belirli bir hedef seçtiyse ve o hedef
     hâlâ tracker'da biliniyorsa onu döndürür; aksi halde (seçim yoksa veya
-    seçilen hedef artık bilinmiyorsa) en son görülen hedefe düşer -- eski
-    varsayılan davranış."""
+    seçilen hedef artık bilinmiyorsa) EN GÜÇLÜ hedefe düşer -- "en son
+    görülen" değil, çünkü zayıf/aralıklı gürültü kırıntıları da arada bir
+    görülüp most_recent()'ı ele geçirebiliyordu (sahada gözlemlendi: gerçek
+    bir hedef 20sn'de 337 kez, gürültü kırıntıları sadece 3-5 kez tespit
+    edilirken otomatik mod aralarında gidip geliyordu)."""
     if selected_id is not None and selected_id in tracker.known:
         return selected_id
-    return tracker.most_recent()
+    return tracker.most_powerful()
 
 
 def main():
@@ -403,6 +471,8 @@ def main():
                         print(f"[*] ET komutu alındı (henüz vericiye bağlı değil): {msg}")
                     elif msg.startswith("SET_POWER "):
                         print(f"[*] Çıkış gücü ayarı alındı (henüz vericiye bağlı değil): {msg}")
+                    elif msg == "BANT_VARSAYILAN":
+                        command_queue.put("bant varsayilan")
                     elif msg.startswith("BANT_AYARLA|"):
                         # BANT_AYARLA|<başlangıç_mhz>|<bitiş_mhz> -- arayüzden gelebilecek
                         # eşdeğeri, bkz. aşağıdaki "bant" klavye komutu.
@@ -463,8 +533,16 @@ def main():
                         # ederiz. Mevcut hedefler/izleme durumu korunur,
                         # sadece arama aralığı ve o anki tur sıfırlanır.
                         parts = line.split()
-                        if len(parts) != 3:
-                            print("[!] Kullanım: bant <başlangıç_mhz> <bitiş_mhz>  (örn: bant 433.0 435.0)")
+                        if len(parts) == 2 and parts[1].lower() in ("varsayilan", "varsayılan", "oto", "otomatik"):
+                            scan_start_mhz, scan_stop_mhz = SCAN_START_MHZ, SCAN_STOP_MHZ
+                            scan_freqs = build_scan_freqs(scan_start_mhz, scan_stop_mhz)
+                            scan_idx = 0
+                            dwelling = False
+                            dwell_locked = False
+                            print(f"[*] Tarama aralığı varsayılana döndürüldü: {scan_start_mhz}-{scan_stop_mhz} MHz "
+                                  f"({len(scan_freqs)} adım)")
+                        elif len(parts) != 3:
+                            print("[!] Kullanım: bant <başlangıç_mhz> <bitiş_mhz>  (örn: bant 433.0 435.0)  |  bant varsayilan")
                         else:
                             try:
                                 new_start, new_stop = float(parts[1]), float(parts[2])
@@ -523,9 +601,17 @@ def main():
                                 raw_freq = tracker.known[target_id]["freq_mhz"]
                                 dwell_center_mhz = round(raw_freq / DWELL_SNAP_MHZ) * DWELL_SNAP_MHZ
                                 dwelling = True
-                                dwell_locked = True
+                                # Kasıtlı olarak dwell_locked=False -- operatörün karta
+                                # tıklaması (görüntülemek/DİNLE için) taramayı SONSUZA
+                                # KADAR durdurmamalı. DWELL_DURATION_S sonra otomatik
+                                # tam-bant turuna döner, tur bitince selected_target_id'ye
+                                # tekrar döner -- bu hedef ÖNCELİKLİ ama taramayı
+                                # ENGELLEMİYOR. Tam kilit sadece hakemin gerçek frekansı
+                                # açıkladığı "frekans" komutunda (yukarıda, satır ~496).
+                                dwell_locked = False
                                 dwell_started_at = time.time()
-                                print(f"[*] {target_id} seçildi, {dwell_center_mhz:.3f} MHz'e kilitlendi.")
+                                print(f"[*] {target_id} seçildi, {dwell_center_mhz:.3f} MHz'e odaklanıldı "
+                                      f"(tam bant taraması devam edecek).")
 
                     else:
                         print(f"[!] Bilinmeyen komut: {line!r} "
