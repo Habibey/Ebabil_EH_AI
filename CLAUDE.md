@@ -66,6 +66,35 @@ Yapılanlar:
    RTL-SDR/libusb kararsızlığının (sık don ma, replug gerektirmesi) Linux'ta
    muhtemelen DAHA AZ görüleceği bekleniyor ama doğrulanmadı.
 
+## GELECEK HEDEF: Jetson Nano ve Raspberry Pi (Ubuntu'dan sonra)
+
+Ubuntu laptop kurulumu bitince sıradaki hedef bunları **gömülü/headless
+sensör kutusu** olarak kurmak: KARAR VERİLDİ -- GUI bu kartlarda ÇALIŞMAYACAK,
+sadece backend (streamer.py/pluto_ed_scanner.py/et_control.py) orada çalışıp
+RF donanımına takılı kalacak; operatör GUI'yi kendi laptopunda
+(`EBABIL_JETSON_IP=<kartın IP'si>` ortam değişkeniyle, bkz. GUI_QtCreator
+CLAUDE.md) uzaktan izleyecek. Yani bu kartlara Qt6/CMake/GUI derleme İŞİ
+HİÇ YOK -- sadece Python + SDR sürücüleri.
+
+Farklılıklar/dikkat edilecekler:
+- **Jetson Nano (JetPack)**: genelde eski Ubuntu (18.04/20.04) + eski Python
+  (3.6 olabilir). `predict.py` zaten TensorFlow yoksa `tflite_runtime`'a
+  düşüyor (`_HAS_TF`) -- Jetson'da NVIDIA'nın CUDA'lı TF wheel'ini kurmaya
+  UĞRAŞMA, doğrudan `pip install tflite_runtime` yeterli, `models/*.tflite`
+  zaten hazır. `sdr_common.py`'de numpy<1.20 için `sliding_window_view`
+  uyumluluk shim'i de zaten var (eski Python 3.6 ihtimaline karşı).
+- **Raspberry Pi**: ARM mimarisi (Jetson'la ortak nokta) -- TensorFlow yine
+  muhtemelen çalışmaz/gereksiz, aynı şekilde `tflite_runtime` kullan.
+- İkisinde de: RTL-SDR/Pluto için udev/`plugdev`,`dialout` grup izni Ubuntu'da
+  yaptığımızın aynısı gerekiyor. ARM için bazı pip paketleri (numpy/scipy)
+  önceden derlenmiş wheel bulamayabilir, `pip install`'ın kaynak koddan
+  derlemesi normalden uzun sürebilir (`python3-dev`, `build-essential`
+  kurulu olsun).
+- Backend'i başlatırken: `EBABIL_ZMQ_BIND_HOST=0.0.0.0` (kartta) +
+  `EBABIL_JETSON_IP=<kartın-IP'si>` (GUI'nin çalıştığı laptopta) -- ikisi
+  birlikte "backend uzakta, GUI ayrı makinede" senaryosunu aktif eder (kod
+  zaten buna göre yazılmıştı, hiç değişiklik gerekmez).
+
 ## Bilinen tuhaflıklar / geçmişten notlar
 
 - RTL-SDR Windows'ta sık sık donup USB'den kayboluyordu (libusb kararsızlığı,
