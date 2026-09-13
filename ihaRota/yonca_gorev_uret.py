@@ -56,8 +56,19 @@ import os
 # ---- PARAMETRELER (yarisma alani belli olunca guncellenecek) ----
 HOME_LAT = 39.9250000   # TODO: gercek yarisma alani merkez enlemi
 HOME_LON = 32.8369960   # TODO: gercek yarisma alani merkez boylami
-ALTITUDE_M = 150.0      # sabit-kanat seyir irtifasi (relative, AGL)
 CRUISE_SPEED_MS = 12.0  # sabit-kanat seyir hizi
+
+# Irtifa artik SABIT degil, spiralin o andaki yaricapina gore degisiyor:
+# yaricap KUCUKKEN (spiralin merkeze yakin kismi) donus daha "siki" --
+# ayni hizda daha kucuk yaricapta donmek daha fazla banka acisi + daha
+# hizli irtifa kaybi riski demek, bu yuzden orada fazladan bir irtifa payi
+# (ALTITUDE_SIKI_DONUS_BONUS_M) ekleniyor. Yaricap buyudukce (disari dogru)
+# donus yumusuyor, irtifa lineer olarak taban degere (ALTITUDE_BASE_M) iner.
+# ONEMLI: 30m sabit kanat icin COK DUSUK bir AGL -- yarisma alanindaki
+# gercek engel/arazi durumunu ve yerel irtifa siniflandirmalarini ayrica
+# kontrol edin, bu sadece istenen degeri uyguluyor, guvenligini DOGRULAMIYOR.
+ALTITUDE_BASE_M = 30.0             # genis (yumusak) donuslerdeki taban seyir irtifasi (relative, AGL)
+ALTITUDE_SIKI_DONUS_BONUS_M = 15.0 # en siki donuste (SPIRAL_MIN_YARICAP_M) taban irtifaya eklenecek pay
 SPIRAL_YARICAP_M = 707.0    # spiralin son yaricapi -- alanin yarim kosegeni (500*sqrt(2)), koseleri kapsar
 SPIRAL_TUR_SAYISI = 5        # spiralin kac tam tur atacagi
 SPIRAL_NOKTA_PER_TUR = 40    # her tur icin waypoint sayisi (egri cozunurlugu)
@@ -86,7 +97,9 @@ def local_to_latlon(x_east_m, y_north_m, lat0, lon0):
     return lat0 + dlat, lon0 + dlon
 
 def spiral_noktalari(yaricap, tur_sayisi, nokta_per_tur, min_yaricap=0.0):
-    """Arsimet spirali uzerinde (x_east, y_north) nokta listesi uretir.
+    """Arsimet spirali uzerinde (x_east, y_north, r) nokta listesi uretir --
+    r de donduruluyor ki cagiran taraf (main()) o noktadaki donus "sikiligina"
+    gore irtifa hesaplayabilsin (bkz. irtifa_hesapla).
     min_yaricap: baslangic yaricapi (sabit kanat icin min donus yaricapi)."""
     toplam_nokta = tur_sayisi * nokta_per_tur
     pts = []
@@ -98,19 +111,30 @@ def spiral_noktalari(yaricap, tur_sayisi, nokta_per_tur, min_yaricap=0.0):
         bearing_rad = math.radians(bearing_deg)
         x_east = r * math.sin(bearing_rad)
         y_north = r * math.cos(bearing_rad)
-        pts.append((x_east, y_north))
+        pts.append((x_east, y_north, r))
     return noktalari_temizle(pts, CAKISMA_ESIK_M)
 
 def noktalari_temizle(pts, esik_m):
-    """Art arda gelen, birbirine esik_m'den yakin noktalari tek noktaya indirger."""
+    """Art arda gelen, birbirine esik_m'den yakin noktalari tek noktaya indirger
+    (r'yi de -- ilk noktanin r'si korunur, aradaki kucuk fark irtifa gecisini
+    etkilemeyecek kadar onemsiz)."""
     if not pts:
         return pts
     temiz = [pts[0]]
-    for (x, y) in pts[1:]:
-        onceki_x, onceki_y = temiz[-1]
+    for (x, y, r) in pts[1:]:
+        onceki_x, onceki_y, _ = temiz[-1]
         if math.hypot(x - onceki_x, y - onceki_y) >= esik_m:
-            temiz.append((x, y))
+            temiz.append((x, y, r))
     return temiz
+
+def irtifa_hesapla(r, r_min, r_max):
+    """Yaricapa gore irtifa: r kucukken (siki donus) taban + bonus, r
+    r_max'a yaklastikca (yumusak donus) lineer olarak taban degere iner."""
+    if r_max <= r_min:
+        return ALTITUDE_BASE_M
+    oran = (r - r_min) / (r_max - r_min)
+    oran = max(0.0, min(1.0, oran))
+    return ALTITUDE_BASE_M + (1.0 - oran) * ALTITUDE_SIKI_DONUS_BONUS_M
 
 def qgc_wpl_satiri(seq, current, frame, command, p1, p2, p3, p4, lat, lon, alt, autocontinue=1):
     return f"{seq}\t{current}\t{frame}\t{command}\t{p1}\t{p2}\t{p3}\t{p4}\t{lat:.7f}\t{lon:.7f}\t{alt:.2f}\t{autocontinue}\n"
@@ -133,10 +157,12 @@ def main():
                                 HOME_LAT, HOME_LON, TAKEOFF_ALT_M))
     seq += 1
 
-    # Spiral deseni: NAV_WAYPOINT (16) dizisi
-    for (x_e, y_n) in spiral_noktalari(SPIRAL_YARICAP_M, SPIRAL_TUR_SAYISI, SPIRAL_NOKTA_PER_TUR, SPIRAL_MIN_YARICAP_M):
+    # Spiral deseni: NAV_WAYPOINT (16) dizisi -- irtifa her noktada o
+    # noktadaki yaricapa (donus sikiligina) gore ayri ayri hesaplaniyor.
+    for (x_e, y_n, r) in spiral_noktalari(SPIRAL_YARICAP_M, SPIRAL_TUR_SAYISI, SPIRAL_NOKTA_PER_TUR, SPIRAL_MIN_YARICAP_M):
         lat, lon = local_to_latlon(x_e, y_n, HOME_LAT, HOME_LON)
-        lines.append(qgc_wpl_satiri(seq, 0, 3, 16, 0, 0, 0, 0, lat, lon, ALTITUDE_M))
+        irtifa = irtifa_hesapla(r, SPIRAL_MIN_YARICAP_M, SPIRAL_YARICAP_M)
+        lines.append(qgc_wpl_satiri(seq, 0, 3, 16, 0, 0, 0, 0, lat, lon, irtifa))
         seq += 1
 
     # Inis yaklasma noktasi: home'dan LAND_APPROACH_DIST_M kadar uzakta
@@ -146,7 +172,7 @@ def main():
     yaklasma_y = LAND_APPROACH_DIST_M * math.cos(yaklasma_bearing_rad)
     yaklasma_lat, yaklasma_lon = local_to_latlon(yaklasma_x, yaklasma_y, HOME_LAT, HOME_LON)
     lines.append(qgc_wpl_satiri(seq, 0, 3, 16, 0, 0, 0, 0,
-                                yaklasma_lat, yaklasma_lon, ALTITUDE_M))
+                                yaklasma_lat, yaklasma_lon, ALTITUDE_BASE_M))
     seq += 1
 
     # NAV_LAND (21): sabit kanat inisi -- home noktasinda
@@ -163,7 +189,8 @@ def main():
     print(f"Yazildi: {out_path}")
     print(f"Toplam waypoint satiri (home haric): {seq - 1}")
     print(f"Spiral yaricapi: {SPIRAL_YARICAP_M} m, tur sayisi: {SPIRAL_TUR_SAYISI}")
-    print(f"Irtifa: {ALTITUDE_M} m, hiz: {CRUISE_SPEED_MS} m/s")
+    print(f"Irtifa: {ALTITUDE_BASE_M}-{ALTITUDE_BASE_M + ALTITUDE_SIKI_DONUS_BONUS_M} m "
+          f"(genis donus -> siki donus), hiz: {CRUISE_SPEED_MS} m/s")
     print(f"Kalkis irtifasi: {TAKEOFF_ALT_M} m, inis yaklasma: {LAND_APPROACH_DIST_M} m")
 
 if __name__ == "__main__":
