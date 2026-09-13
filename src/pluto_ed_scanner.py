@@ -66,6 +66,7 @@ except Exception:
 import sdr_common
 import demod
 from predict import load_model_and_scalers, classify_iq_gated
+from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 
 DRY_RUN = os.environ.get("EBABIL_PLUTO_ED_DRY_RUN", "0") == "1"
 PLUTO_ED_IP = os.environ.get("EBABIL_PLUTO_ED_IP", "ip:192.168.3.1")
@@ -428,6 +429,13 @@ def main():
     rx.connect()
 
     tracker = sdr_common.TargetTracker(id_prefix="PHEDEF")  # streamer.py'nin HEDEF-N'iyle karışmasın
+
+    # Yön bulma + konum kestirimi -- streamer.py'deki AYNI mekanizma (bkz. o
+    # dosyadaki yorum ve konum_istemcisi.py). konum_servisi PHEDEF-N ve
+    # HEDEF-N'i ayrı hedefler olarak (farklı string id) takip ettiği için
+    # iki tarayıcının aynı anda çalışması bir sorun teşkil etmiyor.
+    uav_konum = UavKonumDinleyici()
+    konum_istemcisi = KonumIstemcisi()
     varsayilan_scan_freqs = build_multi_band_scan_freqs()  # "bant varsayilan" ile buna geri dönülür
     scan_freqs = varsayilan_scan_freqs
     scan_idx = 0
@@ -632,6 +640,7 @@ def main():
                             f"{sapma_mhz:.4f}", f"{power_db - snr_db:.2f}", f"{snr_db:.2f}", sureklilik,
                         ]
                         pub.send_string(",".join(sys_fields))
+                        konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
 
                     if not dwelling and scan_idx >= len(scan_freqs):
                         scan_idx = 0

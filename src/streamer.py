@@ -57,6 +57,7 @@ from rtlsdr import RtlSdr
 from predict import load_model_and_scalers, classify_iq_gated, CLASSES
 import sdr_common
 import demod
+from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 
 # --- Tarama ayarları ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
@@ -398,6 +399,8 @@ def build_sys_fields(tracker, tid):
 # pick_target artık sdr_common'da -- pluto_ed_scanner.py ile ORTAK (aynı
 # "seçili hedef yoksa en güçlüye düş" davranışı iki dosyada da isteniyor).
 pick_target = sdr_common.pick_target
+# konum_guncelle_ve_gonder de aynı şekilde konum_istemcisi'nde -- pluto_ed_scanner.py
+# ile ORTAK (bkz. o dosyadaki import).
 
 
 def main():
@@ -435,6 +438,16 @@ def main():
     sdr.gain = "auto"
 
     tracker = TargetTracker(match_tolerance_mhz=TARGET_MATCH_TOLERANCE_MHZ)
+
+    # Yön bulma + konum kestirimi (madde 5.1.4/5.1.5) -- anten çifti donanımı
+    # YOK (tek anten, doğrulandı), bu yüzden "menzil-only": gerçek RSSI +
+    # gerçek İHA konumu (mavlink_bridge.py'den) konum_servisi'ne (C++ PF/EKF)
+    # gönderiliyor, o da hedef konumu + türetilmiş açıyı döndürüyor (bkz.
+    # konum_istemcisi.py). İkisi de arka planda/best-effort -- mavlink_bridge
+    # ya da konum_servisi henüz çalışmıyorsa DF satırı basitçe gönderilmez,
+    # SYS/SPEC akışı etkilenmez.
+    uav_konum = UavKonumDinleyici()
+    konum_istemcisi = KonumIstemcisi()
 
     # Bant aralığı artık çalışırken değiştirilebilir (bkz. aşağıdaki "bant" ve
     # "frekans" komutları) -- şartname madde 5.1.1: hakemler önce hiçbir şey
@@ -706,6 +719,7 @@ def main():
                         sapma_mhz = freq_mhz - dwell_center_mhz
                         tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
                         pub.send_string(",".join(build_sys_fields(tracker, tid)))
+                        konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
 
                 else:
                     # --- ARAMA: tüm bandı ince adımlarla dolaş ---
@@ -724,6 +738,7 @@ def main():
                         sapma_mhz = freq_mhz - center_mhz
                         tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
                         pub.send_string(",".join(build_sys_fields(tracker, tid)))
+                        konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
 
                     if scan_idx >= len(scan_freqs):
                         # Bir tam tur bitti -- operatör bir hedef SEÇTİYSE onun
