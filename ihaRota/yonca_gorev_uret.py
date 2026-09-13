@@ -59,18 +59,16 @@ HOME_LON = 32.8369960   # TODO: gercek yarisma alani merkez boylami
 CRUISE_SPEED_MS = 12.0  # sabit-kanat seyir hizi
 
 # Irtifa artik SABIT degil, spiralin o andaki yaricapina gore degisiyor:
-# spiral MERKEZDE (kucuk yaricap, "siki" donus) DUSUK irtifada baslar,
-# disari dogru YUKSELEREK (yaricap buyudukce, donus yumusadikca) taban/
-# hedef irtifaya (ALTITUDE_BASE_M = 30m) ULASIR -- yani ucak spiral
-# boyunca surekli TIRMANIYOR, inmiyor.
+# NORMAL seyirde (spiralin disa dogru, genis/yumusak donus kismi) taban
+# irtifa 30m; donuse YAKLASTIKCA (yaricap kuculdukce, spiralin merkeze
+# yakin/siki donus kismina dogru) irtifa lineer olarak 45m'ye kadar
+# YUKSELIR -- en siki donus (SPIRAL_MIN_YARICAP_M, spiralin en ic noktasi)
+# 45m'de, en genis donus (SPIRAL_YARICAP_M, en dis nokta) 30m'de.
 # ONEMLI: 30m sabit kanat icin COK DUSUK bir AGL -- yarisma alanindaki
 # gercek engel/arazi durumunu ve yerel irtifa siniflandirmalarini ayrica
 # kontrol edin, bu sadece istenen degeri uyguluyor, guvenligini DOGRULAMIYOR.
-# NOT: TAKEOFF_ALT_M (asagida, 50m) bu 15m'lik baslangictan YUKSEK --
-# kalkis sonrasi spiralin ilk noktasina gecerken kisa bir inis olacak.
-# Bu ayrica istenmedikce (soylenmedi) TAKEOFF_ALT_M'ye dokunulmadi.
-ALTITUDE_BASE_M = 30.0              # disa dogru (yumusak donuste) ULASILAN taban/hedef irtifa (relative, AGL)
-ALTITUDE_MERKEZ_DUSUS_M = 15.0      # en siki donuste (SPIRAL_MIN_YARICAP_M) taban irtifadan ne kadar DUSUK baslanacak
+ALTITUDE_BASE_M = 30.0             # normal (genis/yumusak donus) seyir irtifasi (relative, AGL)
+ALTITUDE_SIKI_DONUS_BONUS_M = 15.0 # donuse yaklasirken (en siki noktada) taban irtifaya eklenecek pay -- 30+15=45
 SPIRAL_YARICAP_M = 707.0    # spiralin son yaricapi -- alanin yarim kosegeni (500*sqrt(2)), koseleri kapsar
 SPIRAL_TUR_SAYISI = 5        # spiralin kac tam tur atacagi
 SPIRAL_NOKTA_PER_TUR = 40    # her tur icin waypoint sayisi (egri cozunurlugu)
@@ -130,15 +128,15 @@ def noktalari_temizle(pts, esik_m):
     return temiz
 
 def irtifa_hesapla(r, r_min, r_max):
-    """Yaricapa gore irtifa: r kucukken (merkez, siki donus) taban irtifadan
-    dusuk baslar; r r_max'a yaklastikca (disari dogru, yumusak donus)
-    LINEER OLARAK YUKSELIR, r_max'ta taban/hedef irtifaya (ALTITUDE_BASE_M)
-    ulasir -- ucak spiral boyunca surekli tirmaniyor, inmiyor."""
+    """Yaricapa gore irtifa: r r_max'a yakinken (disari dogru, yumusak
+    donus) taban irtifa (ALTITUDE_BASE_M); r kucaldikca (donuse yaklasirken,
+    spiralin siki donuslu ic kismi) LINEER OLARAK YUKSELIR, r_min'de
+    (en siki donus) taban + bonus'a (30+15=45m) ulasir."""
     if r_max <= r_min:
         return ALTITUDE_BASE_M
-    oran = (r - r_min) / (r_max - r_min)  # 0 (merkez) -> 1 (dis kenar)
+    oran = (r - r_min) / (r_max - r_min)  # 0 (en siki donus) -> 1 (en genis donus)
     oran = max(0.0, min(1.0, oran))
-    return ALTITUDE_BASE_M - (1.0 - oran) * ALTITUDE_MERKEZ_DUSUS_M
+    return ALTITUDE_BASE_M + (1.0 - oran) * ALTITUDE_SIKI_DONUS_BONUS_M
 
 def qgc_wpl_satiri(seq, current, frame, command, p1, p2, p3, p4, lat, lon, alt, autocontinue=1):
     return f"{seq}\t{current}\t{frame}\t{command}\t{p1}\t{p2}\t{p3}\t{p4}\t{lat:.7f}\t{lon:.7f}\t{alt:.2f}\t{autocontinue}\n"
@@ -193,8 +191,8 @@ def main():
     print(f"Yazildi: {out_path}")
     print(f"Toplam waypoint satiri (home haric): {seq - 1}")
     print(f"Spiral yaricapi: {SPIRAL_YARICAP_M} m, tur sayisi: {SPIRAL_TUR_SAYISI}")
-    print(f"Irtifa: {ALTITUDE_BASE_M - ALTITUDE_MERKEZ_DUSUS_M}-{ALTITUDE_BASE_M} m "
-          f"(merkez/siki donus -> dis/yumusak donus, tirmanarak), hiz: {CRUISE_SPEED_MS} m/s")
+    print(f"Irtifa: {ALTITUDE_BASE_M}-{ALTITUDE_BASE_M + ALTITUDE_SIKI_DONUS_BONUS_M} m "
+          f"(normal seyir -> donuse yaklasirken), hiz: {CRUISE_SPEED_MS} m/s")
     print(f"Kalkis irtifasi: {TAKEOFF_ALT_M} m, inis yaklasma: {LAND_APPROACH_DIST_M} m")
 
 if __name__ == "__main__":
