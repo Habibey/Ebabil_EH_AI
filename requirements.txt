@@ -1,0 +1,20 @@
+# RPi (companion computer) üzerinde çalıştırmak için gerekli Python paketleri.
+# Kurulum: pip3 install -r requirements.txt --break-system-packages
+# (RPi OS/Debian Bookworm PEP 668 nedeniyle --break-system-packages gerekiyor --
+# bu makine tek amaçlı olduğu için sorun değil.)
+#
+# Sistem paketleri (apt ile AYRICA kurulmalı, bunlar pip'ten gelmez):
+#   sudo apt install python3-libgpiod libiio-utils librtlsdr0 portaudio19-dev
+#
+# tensorflow yerine daha hafif bir alternatif gerekirse (RPi'de kurulumu
+# yavaş/başarısız olursa) bkz. src/predict.py -- tflite_runtime + önceden
+# dönüştürülmüş .tflite model dosyasıyla da çalışır (bkz. o dosyadaki
+# _TFLiteModel notu), ama önce düz tensorflow'u dene.
+numpy
+scipy
+pyzmq
+pymavlink
+pyrtlsdr
+pyadi-iio
+tensorflow
+sounddevice
