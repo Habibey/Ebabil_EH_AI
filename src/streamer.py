@@ -71,9 +71,14 @@ SEARCH_STEP_MHZ = SEARCH_SAMPLE_RATE / 1e6  # örtüşmesiz, kanal genişliği k
 # 2400-2483 MHz burada YOK -- RTL-SDR (R828D tuner) donanımsal olarak ~1.7GHz'in
 # üzerine çıkamıyor, o bant sadece Pluto/pluto_ed_scanner.py'de taranabiliyor.
 BANDS = [
-    {"name": "143-145", "start_mhz": 143.0, "stop_mhz": 145.0},
+    # Resmi bant tablosuyla (KTR) birebir: 144-148 (VHF amatör), 863-870
+    # (ISM 868) -- önceki 143-145/868-870 aralıkları 145-148 MHz ve 863-868
+    # MHz'i hiç taramıyordu (kapsam boşluğu, hakem sinyali tam oraya
+    # koyarsa tespit edilemezdi). 430-440 zaten 432.82-435.02'yi kapsayacak
+    # kadar geniş, öyle bırakıldı.
+    {"name": "144-148", "start_mhz": 144.0, "stop_mhz": 148.0},
     {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0},
-    {"name": "868-870", "start_mhz": 868.0, "stop_mhz": 870.0},
+    {"name": "863-870", "start_mhz": 863.0, "stop_mhz": 870.0},
 ]
 
 DWELL_SAMPLE_RATE = 1024000  # izleme modu -- geniş anlık bant, kararlı/akan waterfall için
@@ -504,13 +509,14 @@ def main():
                         handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std,
                                                  selected_target_id, son_siniflandirma)
                     elif msg.startswith("ET,BASLAT,") or msg.startswith("ET,DURDUR,"):
-                        # Takım arkadaşımızın et_kontrol (Desktop/ET/) protokolüyle
-                        # aynı format: "ET,BASLAT,<görev_kodu>,<frekans_mhz>" /
-                        # "ET,DURDUR,<görev_kodu>". Henüz gerçek bir verici/et_kontrol
-                        # bu tarafta çalışmıyor, sadece logluyoruz.
-                        print(f"[*] ET komutu alındı (henüz vericiye bağlı değil): {msg}")
+                        # "ET,BASLAT,<görev_kodu>,<frekans_mhz>" / "ET,DURDUR,<görev_kodu>".
+                        # ZMQ PUB/SUB fan-out olduğu için bu SATIR SADECE görünürlük/log
+                        # amaçlı -- gerçek Pluto TX (karıştırma/aldatma) et_control.py'nin
+                        # AYRI süreci tarafından yapılıyor, o da aynı 5557 komut kanalına
+                        # bağımsız SUB olarak dinliyor (burada tekrar TX tetiklenmiyor).
+                        print(f"[*] ET komutu alındı (SYS/SPEC tarafı sadece logluyor, TX et_control.py'de): {msg}")
                     elif msg.startswith("SET_POWER "):
-                        print(f"[*] Çıkış gücü ayarı alındı (henüz vericiye bağlı değil): {msg}")
+                        print(f"[*] Çıkış gücü ayarı alındı (SYS/SPEC tarafı sadece logluyor, TX et_control.py'de): {msg}")
                     elif msg == "BANT_VARSAYILAN":
                         command_queue.put("bant varsayilan")
                     elif msg.startswith("BANT_AYARLA|"):
