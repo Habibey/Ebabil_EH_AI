@@ -58,7 +58,10 @@ import wave
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.join(_THIS_DIR, "..")
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tools", "dataset"))
-os.environ["PATH"] = os.path.join(_REPO_ROOT, "tools", "libiio") + os.pathsep + os.environ.get("PATH", "")
+if sys.platform == "win32":
+    # libiio.dll'i bulmak için -- Linux/Jetson'da libiio sistem paketinden
+    # (apt: libiio0, pip: pylibiio/pyadi-iio) geldiği için buna gerek yok.
+    os.environ["PATH"] = os.path.join(_REPO_ROOT, "tools", "libiio") + os.pathsep + os.environ.get("PATH", "")
 
 import numpy as np
 import zmq

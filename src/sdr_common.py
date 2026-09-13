@@ -115,7 +115,7 @@ class TargetTracker:
     """Tespit edilen frekansları kalıcı HEDEF-N kimliklerine eşler -- aynı
     frekansta tekrar tespit AYNI id'yi kullanır (yeni kart açılmaz)."""
 
-    def __init__(self, match_tolerance_mhz=0.15, id_prefix="HEDEF"):
+    def __init__(self, match_tolerance_mhz=0.5, id_prefix="HEDEF"):
         self.known = {}  # id -> {"freq_mhz", "power_db", "bandwidth_khz", "snr_db",
                           #        "freq_sapmasi_mhz", "last_seen", "first_seen",
                           #        "update_count", "gaps"}
@@ -189,6 +189,23 @@ class TargetTracker:
         return "Aralıklı"
 
 
+def pick_target(tracker, selected_id):
+    """Operatör belirli bir hedef seçtiyse (ve o hedef hâlâ tracker'da
+    biliniyorsa) onu döndürür; aksi halde EN GÜÇLÜ hedefe düşer -- "en son
+    görülen" değil, çünkü zayıf/aralıklı gürültü kırıntıları da arada bir
+    görülüp most_recent()'ı ele geçirebiliyordu (sahada gözlemlendi: gerçek
+    bir hedef 20sn'de 337 kez, gürültü kırıntıları sadece 3-5 kez tespit
+    edilirken otomatik mod aralarında gidip geliyordu).
+
+    streamer.py (RTL-SDR) ve pluto_ed_scanner.py (PlutoSDR) ile ORTAK
+    kullanılan hedef seçim mantığı -- ikisi de aynı davranışı istediği için
+    burada tek yerde: davranış değişirse iki dosyada ayrı ayrı değil,
+    sadece burada değişir."""
+    if selected_id is not None and selected_id in tracker.known:
+        return selected_id
+    return tracker.most_powerful()
+
+
 def build_scan_freqs(start_mhz, stop_mhz, step_mhz):
     freqs = []
     f = start_mhz
@@ -196,3 +213,69 @@ def build_scan_freqs(start_mhz, stop_mhz, step_mhz):
         freqs.append(f)
         f += step_mhz
     return freqs
+
+
+class TunedSdr:
+    """Bir SDR donanımını (yalnızca .center_freq, .sample_rate, .read_samples(n)
+    ve .close() gerekiyor -- pyrtlsdr'ın arayüzüyle uyumlu her şey) sarmalar;
+    center_freq/sample_rate GERÇEKTEN değişmediyse retune ve throwaway-örnek
+    okumayı atlar.
+
+    Neden gerekli: DİNLE ve periyodik AI sınıflandırması gibi aynı frekansta
+    arka arkaya çok sayıda kısa yakalama yapılan yerlerde, her çağrıda
+    (değişmese bile) retune etmek donanımsal PLL kilitlenme gecikmesi
+    ekliyor -- üretim (RF yakalama) tüketimden (ses çalma hızından) geride
+    kalıp kesik/cızırtılı sese yol açıyordu. Aynı prensip
+    pluto_ed_scanner.py'deki PlutoRX._tune() ile ortak.
+
+    Retune KARARI tek yerde (burada) toplandığı için, bunu çağıran her yer
+    (arama/izleme/dinleme/sınıflandırma/kayıt) sadece "şu frekansta/hızda
+    olmak istiyorum" der -- ne zaman gerçekten donanıma dokunulacağını bilmek
+    zorunda değil. İleride bu davranış değişirse (ör. throwaway sayısı) tek
+    bir yeri güncellemek yeterli, her çağıran yeri tek tek değiştirmeye
+    gerek kalmaz."""
+
+    def __init__(self, device, throwaway_samples):
+        self._device = device
+        self._throwaway_samples = throwaway_samples
+        self._last_freq_hz = None
+        self._last_rate = None
+
+    def tune(self, center_mhz, sample_rate):
+        """center_mhz'e (MHz) ve sample_rate'e (Hz) kilitlenir -- ikisi de
+        son çağrıyla AYNIYSA donanıma hiç dokunmaz."""
+        freq_hz = int(round(center_mhz * 1e6))
+        rate = int(sample_rate)
+        if freq_hz == self._last_freq_hz and rate == self._last_rate:
+            return
+        if rate != self._last_rate:
+            self._device.sample_rate = rate
+        self._device.center_freq = freq_hz
+        self._device.read_samples(self._throwaway_samples)
+        self._last_freq_hz = freq_hz
+        self._last_rate = rate
+
+    def invalidate(self):
+        """Önbelleği temizler -- bir sonraki tune() çağrısı, önceki
+        değerlerle AYNI istense bile donanımı zorla yeniden ayarlar. Bir
+        USB/IIO hatasından sonra donanımın gerçek durumu şüpheliyken kullan."""
+        self._last_freq_hz = None
+        self._last_rate = None
+
+    def read_samples(self, n_samples):
+        return self._device.read_samples(n_samples)
+
+    def close(self):
+        self._device.close()
+
+    def __getattr__(self, name):
+        # Burada tanımlanmayan her şey (ör. .gain okuma) doğrudan cihaza gider.
+        return getattr(self._device, name)
+
+    def __setattr__(self, name, value):
+        # Sarmalayıcının kendi durumu (_device, _last_freq_hz, ...) hariç her
+        # atama (ör. sdr.gain = "auto") doğrudan cihaza gider.
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._device, name, value)

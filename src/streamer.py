@@ -58,11 +58,22 @@ from predict import load_model_and_scalers, classify_iq_gated, CLASSES
 import sdr_common
 import demod
 
-# --- Tarama ayarları (ortam değişkeniyle değiştirilebilir) ---
+# --- Tarama ayarları ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
-SCAN_START_MHZ = float(os.environ.get("EBABIL_SCAN_START_MHZ", 430.0))
-SCAN_STOP_MHZ = float(os.environ.get("EBABIL_SCAN_STOP_MHZ", 440.0))
 SEARCH_STEP_MHZ = SEARCH_SAMPLE_RATE / 1e6  # örtüşmesiz, kanal genişliği kadar adım
+
+# --- Taranacak bantlar -- KTR'nin bant tablosuyla birebir (bkz. pluto_ed_scanner.py'deki
+# AYNI liste) -- yarışmada operatör hedefin hangi bantta olduğunu ÖNCEDEN bilmiyor, bu
+# yüzden varsayılan mod TEK bir aralık değil, ilgili TÜM bantları sırayla tarar. Hakem
+# BANT açıklarsa "bant <başlangıç> <bitiş>" komutu bunu geçici olarak TEK bir aralıkla
+# değiştirir (bkz. aşağıdaki "bant" komutu), "bant varsayilan" bu listeye geri döner.
+# 2400-2483 MHz burada YOK -- RTL-SDR (R828D tuner) donanımsal olarak ~1.7GHz'in
+# üzerine çıkamıyor, o bant sadece Pluto/pluto_ed_scanner.py'de taranabiliyor.
+BANDS = [
+    {"name": "143-145", "start_mhz": 143.0, "stop_mhz": 145.0},
+    {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0},
+    {"name": "868-870", "start_mhz": 868.0, "stop_mhz": 870.0},
+]
 
 DWELL_SAMPLE_RATE = 1024000  # izleme modu -- geniş anlık bant, kararlı/akan waterfall için
 DWELL_SPAN_MHZ = DWELL_SAMPLE_RATE / 1e6
@@ -73,12 +84,15 @@ FFT_SIZE = sdr_common.FFT_SIZE
 FREQ_BINS = sdr_common.FREQ_BINS
 THROWAWAY_SAMPLES = 1024  # her retune/hız değişimi sonrası kararsız örnekleri at
 
-TARGET_MATCH_TOLERANCE_MHZ = 0.15  # bu aralıktaki tekrar tespitler AYNI hedef kabul edilir
-# NOT: Geniş sinyaller (ör. ~200kHz FM yayını) komşu tarama adımları arasında
-# bölününce tepe frekansı tahmini birkaç 10 kHz kayabiliyor -- tolerans bunu
-# tolere edecek kadar geniş olmalı (0.05 denendi, aynı istasyona ikinci bir
-# HEDEF-N açıyordu). Çok dar bantlı/birbirine yakın gerçek hedeflerle
-# çalışırken bu değeri düşürmek gerekebilir.
+TARGET_MATCH_TOLERANCE_MHZ = 0.5  # bu aralıktaki tekrar tespitler AYNI hedef kabul edilir
+# NOT: Geniş/gürültülü sinyaller (ör. ~200kHz FM yayını, ya da 868 MHz gibi
+# bantlarda görülen sıçramalı tepe tahminleri) komşu tarama adımları arasında
+# bölününce tepe frekansı tahmini yüzlerce kHz kayabiliyor -- tolerans bunu
+# tolere edecek kadar geniş olmalı (0.05 ve 0.15 denendi, aynı yayına art
+# arda ikinci/üçüncü/... bir HEDEF-N açıyordu, sahada 868 MHz testinde TEK
+# bir yayın 8 ayrı hedef gibi göründü). Çok dar bantlı/birbirine yakın
+# GERÇEKTEN FARKLI hedeflerle çalışırken bu değeri düşürmek gerekebilir --
+# 0.5 MHz'den yakın iki ayrı verici varsa artık aynı hedef sayılırlar.
 
 CLASSIFY_WINDOW = 128  # modelin beklediği pencere uzunluğu -- SEARCH_SAMPLE_RATE'te toplanmalı (fine-tuning verisiyle tutarlı)
 # Klasik periyodiklik çapraz kontrolü (predict.classical_analog_sayisal) 128
@@ -90,11 +104,11 @@ CLASSICAL_CHECK_WINDOW = 5000
 def capture_power_spectrum(sdr, center_mhz, sample_rate):
     """center_mhz'e kilitlenip FFT_SIZE örnek alır, FREQ_BINS'e indirgenmiş
     güç spektrumunu (dB), her bin'in gerçek frekansını (MHz) ve kullanılan
-    örnekleme hızını (MHz) döndürür. sdr.sample_rate zaten bu değere
-    ayarlanmış olmalı (main() içindeki mod geçişleri bunu yönetiyor).
-    FFT/binleme matematiği sdr_common'da -- pluto_ed_scanner.py ile ortak."""
-    sdr.center_freq = center_mhz * 1e6
-    sdr.read_samples(THROWAWAY_SAMPLES)
+    örnekleme hızını (MHz) döndürür. sdr, sdr_common.TunedSdr olduğu için
+    center_mhz/sample_rate zaten aynıysa retune atlanır -- çağıran taraf
+    hız/mod geçişiyle uğraşmaz. FFT/binleme matematiği sdr_common'da --
+    pluto_ed_scanner.py ile ortak."""
+    sdr.tune(center_mhz, sample_rate)
     samples = sdr.read_samples(FFT_SIZE)
     return sdr_common.compute_power_spectrum(samples, center_mhz, sample_rate)
 
@@ -143,9 +157,7 @@ def handle_save_command(sdr, tracker, args, selected_id=None):
     freq_mhz = tracker.known[tid]["freq_mhz"]
     print(f"[*] Kayıt başlıyor: {tid} ({freq_mhz:.3f} MHz), etiket={label}, süre={duration:.1f}s...")
 
-    sdr.sample_rate = SEARCH_SAMPLE_RATE
-    sdr.center_freq = freq_mhz * 1e6
-    sdr.read_samples(THROWAWAY_SAMPLES)
+    sdr.tune(freq_mhz, SEARCH_SAMPLE_RATE)
 
     n_samples = int(duration * SEARCH_SAMPLE_RATE)
     chunk = 262144  # tek seferde büyük blok istemek USB zaman aşımına yol açıyor
@@ -180,9 +192,7 @@ def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_s
         return
 
     freq_mhz = tracker.known[tid]["freq_mhz"]
-    sdr.sample_rate = SEARCH_SAMPLE_RATE
-    sdr.center_freq = freq_mhz * 1e6
-    sdr.read_samples(THROWAWAY_SAMPLES)
+    sdr.tune(freq_mhz, SEARCH_SAMPLE_RATE)
     # Modelin gördüğü pencere (ilk CLASSIFY_WINDOW örnek) DEĞİŞMİYOR -- eğitimde
     # kullanılanla birebir aynı kalsın diye. Geri kalanı SADECE klasik periyodiklik
     # çapraz kontrolü için (bkz. predict.classify_iq_gated).
@@ -207,6 +217,17 @@ def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_s
 
 def build_scan_freqs(start_mhz, stop_mhz):
     return sdr_common.build_scan_freqs(start_mhz, stop_mhz, SEARCH_STEP_MHZ)
+
+
+def build_multi_band_scan_freqs():
+    """BANDS listesindeki tüm bantları arka arkaya tarayan frekans listesini
+    üretir -- varsayılan mod budur (bkz. pluto_ed_scanner.py'deki aynı isimli
+    fonksiyon). Bantlar arasındaki boşluklar taranmaz, bir bitince direkt
+    sıradakine atlanır."""
+    freqs = []
+    for band in BANDS:
+        freqs.extend(build_scan_freqs(band["start_mhz"], band["stop_mhz"]))
+    return freqs
 
 
 # --- Sinyal İzleme/Dinleme (KTR 4.3) -- gerçek AM/FM demodülasyonu ---
@@ -330,9 +351,13 @@ def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma):
     """Bir dinleme döngüsü adımı: freq_mhz'e kilitlenip DINLEME_BLOK_SURESI_S
     kadar örnek alır, hedefin son bilinen sınıflandırmasına göre demodüle
     eder, aktif DinlemeOturumu'na yazar/çalar. Ayrıca aynı örneklerden bir
-    güç spektrumu döndürür ki İZLEME modundaki gibi waterfall akmaya devam etsin."""
-    sdr.center_freq = freq_mhz * 1e6
-    sdr.read_samples(THROWAWAY_SAMPLES)
+    güç spektrumu döndürür ki İZLEME modundaki gibi waterfall akmaya devam
+    etsin. sdr bir sdr_common.TunedSdr olduğu için freq_mhz bloklar arasında
+    DEĞİŞMEDİYSE (asıl senaryo -- aynı hedef dinlenirken) gereksiz retune
+    atlanır; önceden HER 250ms'lik blokta yeniden retune ediliyordu, bu da
+    üretimin gerçek zamanlıdan geride kalıp kesik/cızırtılı sese yol açan
+    ana etkendi."""
+    sdr.tune(freq_mhz, SEARCH_SAMPLE_RATE)
     n_samples = int(DINLEME_BLOK_SURESI_S * SEARCH_SAMPLE_RATE)
     samples = sdr.read_samples(n_samples)
 
@@ -370,17 +395,9 @@ def build_sys_fields(tracker, tid):
     ]
 
 
-def pick_target(tracker, selected_id):
-    """Operatör 'hedef <id>' komutuyla belirli bir hedef seçtiyse ve o hedef
-    hâlâ tracker'da biliniyorsa onu döndürür; aksi halde (seçim yoksa veya
-    seçilen hedef artık bilinmiyorsa) EN GÜÇLÜ hedefe düşer -- "en son
-    görülen" değil, çünkü zayıf/aralıklı gürültü kırıntıları da arada bir
-    görülüp most_recent()'ı ele geçirebiliyordu (sahada gözlemlendi: gerçek
-    bir hedef 20sn'de 337 kez, gürültü kırıntıları sadece 3-5 kez tespit
-    edilirken otomatik mod aralarında gidip geliyordu)."""
-    if selected_id is not None and selected_id in tracker.known:
-        return selected_id
-    return tracker.most_powerful()
+# pick_target artık sdr_common'da -- pluto_ed_scanner.py ile ORTAK (aynı
+# "seçili hedef yoksa en güçlüye düş" davranışı iki dosyada da isteniyor).
+pick_target = sdr_common.pick_target
 
 
 def main():
@@ -408,10 +425,14 @@ def main():
     model, feature_mean, feature_std = load_model_and_scalers()
     print("[+] Model hazır.")
 
-    sdr = RtlSdr()
-    sdr.sample_rate = SEARCH_SAMPLE_RATE
+    # TunedSdr, aynı frekans/hıza tekrar tekrar kilitlenmek istendiğinde
+    # (DİNLE, sınıflandırma, dwell) gereksiz retune'u kendi içinde önbellekle
+    # atlıyor -- bkz. sdr_common.TunedSdr. Çağıran kod (aşağıdaki main döngüsü
+    # ve capture_power_spectrum/handle_dinleme_capture/handle_classify_request/
+    # handle_save_command) artık "hangi hızdayız" diye ayrıca takip etmiyor,
+    # sadece sdr.tune(freq, rate) der.
+    sdr = sdr_common.TunedSdr(RtlSdr(), throwaway_samples=THROWAWAY_SAMPLES)
     sdr.gain = "auto"
-    current_rate = SEARCH_SAMPLE_RATE
 
     tracker = TargetTracker(match_tolerance_mhz=TARGET_MATCH_TOLERANCE_MHZ)
 
@@ -419,9 +440,10 @@ def main():
     # "frekans" komutları) -- şartname madde 5.1.1: hakemler önce hiçbir şey
     # söylemez, hiçbir takım bulamazsa önce BANT sonra FREKANS açıklayabilir.
     # Bu durumda süreci yeniden başlatmadan taramayı daraltabilmemiz gerekiyor.
-    scan_start_mhz = SCAN_START_MHZ
-    scan_stop_mhz = SCAN_STOP_MHZ
-    scan_freqs = build_scan_freqs(scan_start_mhz, scan_stop_mhz)
+    # Varsayılan: TEK bir aralık değil, BANDS'teki TÜM bantlar sırayla --
+    # operatör hedefin hangi bantta olduğunu önceden bilmiyor.
+    varsayilan_scan_freqs = build_multi_band_scan_freqs()  # "bant varsayilan" ile buna geri dönülür
+    scan_freqs = varsayilan_scan_freqs
     scan_idx = 0
 
     dwelling = False
@@ -443,11 +465,17 @@ def main():
     dinleme = DinlemeOturumu()
     dinleme_hedef_id = None  # None = dinleme kapalı, aksi halde dinlenen hedefin id'si
 
+    # GUI'deki "TARAMAYI DURDUR" düğmesiyle -- True iken ARAMA/İZLEME tamamen
+    # durur (SDR'a hiç dokunulmaz, SPEC/SYS yayınlanmaz), DİNLE etkilenmez.
+    tarama_duraklatildi = False
+    son_duraklatma_heartbeat = 0.0  # bkz. aşağıdaki "DURAKLATILDI" dalı
+
     command_queue = queue.Queue()
     threading.Thread(target=stdin_command_reader, args=(command_queue,), daemon=True).start()
 
-    print(f"[*] {scan_start_mhz}-{scan_stop_mhz} MHz aralığı taranıyor "
-          f"({len(scan_freqs)} adım, adım genişliği {SEARCH_STEP_MHZ:.3f} MHz)")
+    band_names = ", ".join(f"{b['name']} MHz" for b in BANDS)
+    print(f"[*] Taranacak bantlar: {band_names} ({len(scan_freqs)} adım toplam, "
+          f"adım genişliği {SEARCH_STEP_MHZ:.3f} MHz)")
     print("[*] Port 5555: SYS/SPEC | Port 5556: AI | Port 5557: komut dinleniyor")
     print("[*] Gerçek veri kaydetmek için: kaydet <ETİKET> [süre_sn]  (örn: kaydet WBFM 10)")
     print("[*] Hakem bant açıklarsa: bant <başlangıç_mhz> <bitiş_mhz>  (örn: bant 433.0 435.0)")
@@ -462,7 +490,6 @@ def main():
                     if msg == "SDR_VERISI_ISTEK":
                         handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std,
                                                  selected_target_id, son_siniflandirma)
-                        current_rate = None  # handle_classify_request hızı değiştirdi, döngü yeniden ayarlasın
                     elif msg.startswith("ET,BASLAT,") or msg.startswith("ET,DURDUR,"):
                         # Takım arkadaşımızın et_kontrol (Desktop/ET/) protokolüyle
                         # aynı format: "ET,BASLAT,<görev_kodu>,<frekans_mhz>" /
@@ -513,8 +540,18 @@ def main():
                     elif msg == "DINLE_DURDUR":
                         dinleme.durdur()
                         dinleme_hedef_id = None
-                        current_rate = None
                         pub.send_string("DURUM,TARIYOR")
+                    elif msg == "TARAMA_DURDUR":
+                        # Sürekli tarama (her adımda retune+capture+SPEC yayını)
+                        # zayıf sistemlerde GUI'yi zorluyor -- operatör izlemeye
+                        # ara vermek isterse burada tamamen durur (DİNLE aktifse
+                        # etkilenmez, bkz. aşağıdaki mod seçimi).
+                        tarama_duraklatildi = True
+                        pub.send_string("DURUM,DURAKLATILDI")
+                        print("[*] Tarama duraklatıldı.")
+                    elif msg == "TARAMA_DEVAM":
+                        tarama_duraklatildi = False
+                        print("[*] Tarama devam ediyor.")
                 except zmq.Again:
                     pass
 
@@ -524,7 +561,6 @@ def main():
                     lower = line.lower()
                     if lower.startswith("kaydet"):
                         handle_save_command(sdr, tracker, line[len("kaydet"):].strip(), selected_target_id)
-                        current_rate = None
 
                     elif lower.startswith("bant"):
                         # Şartname madde 5.1.1: hiçbir takım sinyali bulamazsa
@@ -534,12 +570,12 @@ def main():
                         # sadece arama aralığı ve o anki tur sıfırlanır.
                         parts = line.split()
                         if len(parts) == 2 and parts[1].lower() in ("varsayilan", "varsayılan", "oto", "otomatik"):
-                            scan_start_mhz, scan_stop_mhz = SCAN_START_MHZ, SCAN_STOP_MHZ
-                            scan_freqs = build_scan_freqs(scan_start_mhz, scan_stop_mhz)
+                            scan_freqs = varsayilan_scan_freqs
                             scan_idx = 0
                             dwelling = False
                             dwell_locked = False
-                            print(f"[*] Tarama aralığı varsayılana döndürüldü: {scan_start_mhz}-{scan_stop_mhz} MHz "
+                            band_names = ", ".join(f"{b['name']} MHz" for b in BANDS)
+                            print(f"[*] Tarama bandı varsayılana döndürüldü: {band_names} "
                                   f"({len(scan_freqs)} adım)")
                         elif len(parts) != 3:
                             print("[!] Kullanım: bant <başlangıç_mhz> <bitiş_mhz>  (örn: bant 433.0 435.0)  |  bant varsayilan")
@@ -549,12 +585,11 @@ def main():
                                 if new_start >= new_stop:
                                     print(f"[!] Başlangıç bitişten küçük olmalı: {new_start} >= {new_stop}")
                                 else:
-                                    scan_start_mhz, scan_stop_mhz = new_start, new_stop
-                                    scan_freqs = build_scan_freqs(scan_start_mhz, scan_stop_mhz)
+                                    scan_freqs = build_scan_freqs(new_start, new_stop)
                                     scan_idx = 0
                                     dwelling = False
                                     dwell_locked = False
-                                    print(f"[*] Tarama aralığı güncellendi: {scan_start_mhz}-{scan_stop_mhz} MHz "
+                                    print(f"[*] Tarama aralığı güncellendi: {new_start}-{new_stop} MHz "
                                           f"({len(scan_freqs)} adım)")
                             except ValueError:
                                 print(f"[!] Geçersiz sayı: {line!r}")
@@ -637,21 +672,28 @@ def main():
                         dinleme_hedef_id = None
                         pub.send_string("DURUM,TARIYOR")
                     else:
-                        if current_rate != SEARCH_SAMPLE_RATE:
-                            sdr.sample_rate = SEARCH_SAMPLE_RATE
-                            current_rate = SEARCH_SAMPLE_RATE
                         dinleme_freq_mhz = tracker.known[dinleme_hedef_id]["freq_mhz"]
                         binned_db, bin_freqs_mhz, fs_mhz = handle_dinleme_capture(
                             sdr, dinleme, dinleme_hedef_id, dinleme_freq_mhz, son_siniflandirma)
                         spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
                         pub.send_string(",".join(spec_fields))
 
+                elif tarama_duraklatildi:
+                    # --- DURAKLATILDI: operatör "TARAMAYI DURDUR" dedi --
+                    # SDR'a hiç dokunulmuyor, SPEC/SYS yayınlanmıyor (waterfall
+                    # olduğu yerde donuk kalır), ama backend CPU/USB yükü
+                    # gerçekten düşer. Yine de GUI'nin bağlantı-canlılık
+                    # kontrolü (bkz. mainwindow.cpp baglantiTazelikKontrolu --
+                    # birkaç saniyedir HİÇBİR paket gelmezse "BAĞLI DEĞİL"
+                    # sayıyor) duraklatmayı kopma sanmasın diye hafif bir
+                    # "hâlâ buradayım" mesajı göndermeye devam ediyoruz.
+                    if time.time() - son_duraklatma_heartbeat > 1.0:
+                        pub.send_string("DURUM,DURAKLATILDI")
+                        son_duraklatma_heartbeat = time.time()
+                    time.sleep(0.2)
+
                 elif dwelling:
                     # --- İZLEME (dwell): hedefe kilitli, geniş bant, sabit merkez ---
-                    if current_rate != DWELL_SAMPLE_RATE:
-                        sdr.sample_rate = DWELL_SAMPLE_RATE
-                        current_rate = DWELL_SAMPLE_RATE
-
                     binned_db, bin_freqs_mhz, fs_mhz = capture_power_spectrum(sdr, dwell_center_mhz, DWELL_SAMPLE_RATE)
 
                     spec_fields = ["SPEC", f"{dwell_center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
@@ -667,10 +709,6 @@ def main():
 
                 else:
                     # --- ARAMA: tüm bandı ince adımlarla dolaş ---
-                    if current_rate != SEARCH_SAMPLE_RATE:
-                        sdr.sample_rate = SEARCH_SAMPLE_RATE
-                        current_rate = SEARCH_SAMPLE_RATE
-
                     center_mhz = scan_freqs[scan_idx]
                     scan_idx += 1
 
@@ -706,12 +744,17 @@ def main():
                 # bu döngü sürekli hata basar, en azından süreç ayakta kalır
                 # ve loglardan fark edilir.
                 print(f"[!] Tarama/sınıflandırma sırasında hata (devam ediliyor): {e}")
-                current_rate = None  # hata sonrası hız durumu şüpheli, bir sonraki adımda zorla yeniden ayarla
+                sdr.invalidate()  # donanımın gerçek durumu şüpheli, bir sonraki tune() zorla yeniden ayarlasın
                 time.sleep(0.5)
 
+    except KeyboardInterrupt:
+        # et_control.py ve pluto_ed_scanner.py ile aynı davranış -- Ctrl+C
+        # temiz çıksın (traceback basmadan), donanım yine de finally'de kapatılır.
+        pass
     finally:
         dinleme.durdur()
         sdr.close()
+        print("\n[*] streamer kapatıldı.")
 
 
 if __name__ == "__main__":

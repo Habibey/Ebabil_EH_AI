@@ -22,10 +22,14 @@ almanız gerekiyor -- yoksa ikisi de aynı adrese denk gelir, ikisine de düzgü
 erişilemez. Aşağıdaki EBABIL_PLUTO_ED_IP ile hangi adresi kullanacağını
 belirtebilirsin.
 
-Sınıflandırma (AI) YOK -- bu scriptin işi sadece tespit (OS-CFAR ile "burada
-bir şey var mı"). Modülasyon sınıflandırması istenirse streamer.py'deki gibi
-ayrıca eklenir; şimdilik kapsam dışı (KTR'deki YOLO/FHSS-örüntü tanıma da
-büyük ayrı bir iş, bu script onu içermiyor).
+Sınıflandırma (AI): streamer.py'deki AYNI predict.py modelini kullanır (tek
+kaynak, iki backend de aynı şekilde çıkarım yapar). Tek fark: predict.py'nin
+özellik çıkarımı RTL-SDR'ın 250 kSPS'lik verisiyle fine-tune edildi, Pluto ise
+o hızda değil CLASSIFY_CAPTURE_RATE'te (kanıtlanmış çalışan, DINLEME_SAMPLE_RATE
+ile aynı) yakalıyor -- sınıflandırmadan önce 250 kSPS'e yeniden örnekleniyor
+(bkz. _resample_to_classify_rate). AI paketleri streamer.py'nin 5556'sıyla
+ÇAKIŞMASIN diye AYRI bir portta (5561) yayınlanır -- ikisi de aynı anda
+sınıflandırma yapabilsin diye (bkz. SYS_SPEC_PORT'taki aynı gerekçe).
 
 Kullanım:
   python src/pluto_ed_scanner.py
@@ -38,14 +42,21 @@ import threading
 import time
 import wave
 
+from fractions import Fraction
+
 import numpy as np
 import zmq
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import resample_poly
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.join(_THIS_DIR, "..")
 sys.path.insert(0, _THIS_DIR)
-os.environ["PATH"] = os.path.join(_REPO_ROOT, "tools", "libiio") + os.pathsep + os.environ.get("PATH", "")
+if sys.platform == "win32":
+    # libiio.dll'i bulmak için -- Linux/Jetson'da libiio sistem paketinden
+    # (apt: libiio0, pip: pylibiio/pyadi-iio) geldiği için buna gerek yok
+    # (bkz. streamer.py'deki RTL-SDR için aynı desen).
+    os.environ["PATH"] = os.path.join(_REPO_ROOT, "tools", "libiio") + os.pathsep + os.environ.get("PATH", "")
 
 try:
     import sounddevice as sd
@@ -54,6 +65,7 @@ except Exception:
 
 import sdr_common
 import demod
+from predict import load_model_and_scalers, classify_iq_gated
 
 DRY_RUN = os.environ.get("EBABIL_PLUTO_ED_DRY_RUN", "0") == "1"
 PLUTO_ED_IP = os.environ.get("EBABIL_PLUTO_ED_IP", "ip:192.168.3.1")
@@ -92,6 +104,23 @@ DWELL_SNAP_MHZ = 0.1
 THROWAWAY_SAMPLES = 1024
 SYS_SPEC_PORT = 5560  # streamer.py'nin 5555/5556'siyla CAKISMASIN diye ayri
 CMD_PORT = 5557  # komut kanali streamer.py ile PAYLASILIYOR (ayni PUB/SUB fan-out)
+AI_PORT = int(os.environ.get("EBABIL_PLUTO_AI_PORT", "5561"))  # streamer.py'nin 5556'siyla CAKISMASIN diye ayri
+
+# --- Sınıflandırma (AI) -- predict.py ile ORTAK model, streamer.py ile aynı mantık ---
+# predict.py'nin özellik çıkarımı (Inst_Freq vb.) RTL-SDR'ın 250 kSPS'lik
+# verisiyle fine-tune edildi -- Pluto/AD9361'de bu hızın güvenilir çalışıp
+# çalışmadığı test edilmedi. Bunun yerine Pluto için KANITLANMIŞ çalışan bir
+# hızda (DINLEME_SAMPLE_RATE ile aynı varsayılan) yakalayıp, sınıflandırmadan
+# hemen önce 250 kSPS'e yeniden örnekliyoruz (bkz. _resample_to_classify_rate)
+# -- resample_poly zaten anti-alias filtreli olduğu için fiziksel frekans
+# içeriği korunur, sadece model neyle eğitildiyse o hıza getirilir.
+CLASSIFY_CAPTURE_RATE = int(os.environ.get("EBABIL_PLUTO_CLASSIFY_HZ", "1000000"))
+CLASSIFY_TARGET_RATE = 250_000
+CLASSIFY_WINDOW = 128  # modelin beklediği pencere uzunluğu (bkz. streamer.py'deki aynı sabit)
+CLASSICAL_CHECK_WINDOW = 5000  # klasik periyodiklik çapraz kontrolü için (bkz. predict.classify_iq_gated)
+# CLASSICAL_CHECK_WINDOW kadar örneği 250 kSPS'te elde etmek için
+# CLASSIFY_CAPTURE_RATE'te kaç ham örnek yakalanması gerektiği.
+_CLASSIFY_RAW_SAMPLES = int(CLASSICAL_CHECK_WINDOW * CLASSIFY_CAPTURE_RATE / CLASSIFY_TARGET_RATE)
 
 
 def build_multi_band_scan_freqs():
@@ -142,8 +171,17 @@ class PlutoRX:
         print(f"[*] İkinci PlutoSDR'a (RX) bağlanılıyor ({PLUTO_ED_IP})...")
         self.pluto = adi.Pluto(PLUTO_ED_IP)
         self.pluto.rx_enabled_channels = [0]
-        self.pluto.gain_control_mode_chan0 = "slow_attack"  # otomatik kazanç -- RTL-SDR'daki gain='auto' eşdeğeri
-        print("[+] Pluto RX hazır.")
+        # DENENDİ VE GERİ ALINDI: sabit 70dB manuel kazanç, alıcının kendi
+        # gürültü tabanını da orantılı yükseltip sinyali neredeyse her yerde
+        # gürültüye gömüyordu (canlı CFAR verisiyle doğrulandı -- 430-440 MHz
+        # taramasında 8 pencereden 7'sinde yerel gürültü tabanı sinyal
+        # seviyesine o kadar yakındı ki hiçbir yerde eşiği geçemiyordu,
+        # sadece tesadüfen ÇOK güçlü olan tek bir pencere sıyrılabildi).
+        # AGC ("slow_attack") bu dengeyi kendisi kuruyor -- RTL-SDR'daki
+        # gain="auto" eşdeğeri, aralıklı tespit sorununun asıl kaynağı
+        # muhtemelen kazanç değil, antenin kendisiydi.
+        self.pluto.gain_control_mode_chan0 = "slow_attack"
+        print("[+] Pluto RX hazır (AGC: slow_attack).")
 
     def capture(self, center_mhz, sample_rate):
         if DRY_RUN:
@@ -304,6 +342,49 @@ class DinlemeOturumu:
         self.hedef_id = None
 
 
+def _resample_to_classify_rate(iq, fs_in):
+    """iq (complex) örneklerini fs_in'den CLASSIFY_TARGET_RATE'e yeniden
+    örnekler -- bkz. CLASSIFY_CAPTURE_RATE yorumundaki gerekçe."""
+    ratio = Fraction(CLASSIFY_TARGET_RATE, int(fs_in)).limit_denominator(1000)
+    return resample_poly(iq, ratio.numerator, ratio.denominator)
+
+
+def handle_classify_request(rx, pub_ai, tracker, model, feature_mean, feature_std, selected_id, son_siniflandirma):
+    """streamer.py'deki handle_classify_request ile aynı mantık, sadece
+    yakalama donanımı ve hızı farklı (bkz. CLASSIFY_CAPTURE_RATE). Sonuç
+    AI_PORT'tan streamer.py ile BİREBİR AYNI formatta yayınlanır:
+    AI,id,analogSayisal,modulasyonTuru -- GUI id'ye göre eşleştirdiği için
+    (bkz. mainwindow.cpp hedefYapayZekaGuncelle) PHEDEF-N kartları da bu
+    paketle güncellenir, arayüzde ayrıca bir değişiklik gerekmez."""
+    tid = sdr_common.pick_target(tracker, selected_id)
+    if tid is None:
+        print("[!] Henüz tespit edilmiş hedef yok, sınıflandırma isteği atlandı.")
+        return
+
+    freq_mhz = tracker.known[tid]["freq_mhz"]
+    raw_samples = rx.capture_raw(freq_mhz, CLASSIFY_CAPTURE_RATE, _CLASSIFY_RAW_SAMPLES)
+    resampled = _resample_to_classify_rate(raw_samples, CLASSIFY_CAPTURE_RATE)
+
+    # Modelin gördüğü pencere (ilk CLASSIFY_WINDOW örnek) DEĞİŞMİYOR -- eğitimde
+    # kullanılanla birebir aynı kalsın diye. Geri kalanı SADECE klasik periyodiklik
+    # çapraz kontrolü için (bkz. predict.classify_iq_gated).
+    window_full = resampled[:CLASSICAL_CHECK_WINDOW]
+    window = window_full[:CLASSIFY_WINDOW]
+
+    I = np.real(window).astype(np.float32)
+    Q = np.imag(window).astype(np.float32)
+    classical_I = np.real(window_full).astype(np.float32)
+    classical_Q = np.imag(window_full).astype(np.float32)
+    analog_sayisal, mod, confidence = classify_iq_gated(
+        model, feature_mean, feature_std, I, Q, classical_I, classical_Q)
+
+    pub_ai.send_string(f"AI,{tid},{analog_sayisal},{mod}")
+    print(f"[>] {tid} ({freq_mhz:.3f} MHz) sınıflandırıldı: {mod} ({analog_sayisal}) - güven %{confidence:.1f}")
+
+    if son_siniflandirma is not None:
+        son_siniflandirma[tid] = (analog_sayisal, mod)
+
+
 def handle_dinleme_capture(rx, dinleme, hedef_id, freq_mhz):
     t0 = time.time()
     n_samples = int(DINLEME_BLOK_SURESI_S * DINLEME_SAMPLE_RATE)
@@ -332,9 +413,16 @@ def main():
     pub = context.socket(zmq.PUB)
     pub.bind(f"tcp://127.0.0.1:{SYS_SPEC_PORT}")
 
+    pub_ai = context.socket(zmq.PUB)
+    pub_ai.bind(f"tcp://127.0.0.1:{AI_PORT}")
+
     sub_cmd = context.socket(zmq.SUB)
     sub_cmd.connect(f"tcp://127.0.0.1:{CMD_PORT}")
     sub_cmd.setsockopt_string(zmq.SUBSCRIBE, "")
+
+    print("[*] Model yükleniyor...")
+    model, feature_mean, feature_std = load_model_and_scalers()
+    print("[+] Model hazır.")
 
     rx = PlutoRX()
     rx.connect()
@@ -353,12 +441,22 @@ def main():
     dinleme = DinlemeOturumu()
     dinleme_hedef_id = None
 
+    # GUI'deki "TARAMAYI DURDUR" düğmesiyle -- True iken ARAMA/İZLEME tamamen
+    # durur (Pluto'ya hiç dokunulmaz, SPEC/SYS yayınlanmaz), DİNLE etkilenmez.
+    tarama_duraklatildi = False
+    son_duraklatma_heartbeat = 0.0  # bkz. aşağıdaki "DURAKLATILDI" dalı
+
+    # tid -> (analogSayisal, modulasyonTuru) -- handle_classify_request
+    # günceller. DİNLE bunu şu an kullanmıyor (bkz. DINLEME_VARSAYILAN_MOD),
+    # sadece AI kartı alanlarını doldurmak için tutuluyor.
+    son_siniflandirma = {}
+
     command_queue = queue.Queue()
     threading.Thread(target=stdin_command_reader, args=(command_queue,), daemon=True).start()
 
     band_names = ", ".join(f"{b['name']} MHz" for b in BANDS)
     print(f"[*] Taranacak bantlar: {band_names} ({len(scan_freqs)} adım toplam)")
-    print(f"[*] Port {SYS_SPEC_PORT}: SYS/SPEC | Port {CMD_PORT}: komut dinleniyor (paylaşımlı)")
+    print(f"[*] Port {SYS_SPEC_PORT}: SYS/SPEC | Port {AI_PORT}: AI | Port {CMD_PORT}: komut dinleniyor (paylaşımlı)")
     print("[*] Belirli bir hedefe kilitlenmek için: hedef <id>  |  hedef oto\n")
 
     try:
@@ -369,6 +467,9 @@ def main():
                     if msg.startswith("PLUTO_ED_HEDEF_SEC|"):
                         _, target_id = msg.split("|")
                         command_queue.put(f"hedef {target_id}")
+                    elif msg == "SDR_VERISI_ISTEK":
+                        handle_classify_request(rx, pub_ai, tracker, model, feature_mean, feature_std,
+                                                 selected_target_id, son_siniflandirma)
                     elif msg.startswith("DINLE_BASLAT|"):
                         try:
                             _, hedef_id = msg.split("|")
@@ -396,6 +497,13 @@ def main():
                             print(f"[!] Geçersiz BANT_AYARLA komutu: {msg}")
                     elif msg == "BANT_VARSAYILAN":
                         command_queue.put("bant varsayilan")
+                    elif msg == "TARAMA_DURDUR":
+                        tarama_duraklatildi = True
+                        pub.send_string("DURUM,DURAKLATILDI")
+                        print("[*] Tarama duraklatıldı.")
+                    elif msg == "TARAMA_DEVAM":
+                        tarama_duraklatildi = False
+                        print("[*] Tarama devam ediyor.")
                 except zmq.Again:
                     pass
 
@@ -488,6 +596,16 @@ def main():
                         spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
                         pub.send_string(",".join(spec_fields))
 
+                elif tarama_duraklatildi:
+                    # --- DURAKLATILDI: operatör "TARAMAYI DURDUR" dedi --
+                    # Pluto'ya hiç dokunulmuyor, SPEC/SYS yayınlanmıyor. GUI'nin
+                    # bağlantı-canlılık kontrolü duraklatmayı kopma sanmasın
+                    # diye hafif bir "hâlâ buradayım" mesajı gönderiyoruz.
+                    if time.time() - son_duraklatma_heartbeat > 1.0:
+                        pub.send_string("DURUM,DURAKLATILDI")
+                        son_duraklatma_heartbeat = time.time()
+                    time.sleep(0.2)
+
                 else:
                     if dwelling:
                         binned_db, bin_freqs_mhz, fs_mhz = rx.capture(dwell_center_mhz, DWELL_SAMPLE_RATE)
@@ -517,14 +635,7 @@ def main():
 
                     if not dwelling and scan_idx >= len(scan_freqs):
                         scan_idx = 0
-                        lock_target = None
-                        if selected_target_id is not None and selected_target_id in tracker.known:
-                            lock_target = selected_target_id
-                        else:
-                            # "En son görülen" değil "en güçlü" -- zayıf/aralıklı
-                            # gürültü kırıntıları arada bir görülüp otomatik
-                            # modu ele geçirmesin (bkz. sdr_common.most_powerful).
-                            lock_target = tracker.most_powerful()
+                        lock_target = sdr_common.pick_target(tracker, selected_target_id)
                         if lock_target is not None:
                             raw_freq = tracker.known[lock_target]["freq_mhz"]
                             dwell_center_mhz = round(raw_freq / DWELL_SNAP_MHZ) * DWELL_SNAP_MHZ
@@ -535,6 +646,7 @@ def main():
                     time.sleep(0.05)  # sahte modda CPU'yu bogmasin
 
             except Exception as e:
+                import traceback; traceback.print_exc()
                 print(f"[!] Tarama sırasında hata (devam ediliyor): {e}")
                 time.sleep(0.5)
 
