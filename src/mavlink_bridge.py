@@ -8,14 +8,19 @@ kendi açıyor -- aynı porta iki süreç birden bind edemez. EHARPP'in
 ZmqSubscriber'ı hem 5555/5556'yı HEM bu portu (5559) dinleyecek şekilde
 güncellendi (bkz. mainwindow.cpp setupZmqConnections).
 
-Kullanım:
+Kullanım (Windows):
   python src/mavlink_bridge.py                  # varsayılan COM15, 115200 baud
   python src/mavlink_bridge.py --port COM16
   EBABIL_MAVLINK_PORT=COM15 python src/mavlink_bridge.py
+
+Kullanım (Linux/Jetson -- port adları farklı, /dev/ttyACM0 gibi):
+  python src/mavlink_bridge.py --port /dev/ttyACM0
+  EBABIL_MAVLINK_PORT=/dev/ttyACM0 python src/mavlink_bridge.py
 """
 import argparse
 import math
 import os
+import sys
 import time
 
 import zmq
@@ -23,12 +28,15 @@ from pymavlink import mavutil
 
 UAV_PUB_PORT = 5559
 PUBLISH_INTERVAL_S = 0.5  # arayüz için yeterli, MAVLink akışını da bogmaz
+# Matek'in varsayılan port adı işletim sistemine göre değişir -- Windows'ta
+# COM<N>, Linux/Jetson'da genelde /dev/ttyACM<N> (native USB CDC seri port).
+_DEFAULT_PORT = "COM15" if sys.platform == "win32" else "/dev/ttyACM0"
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default=os.environ.get("EBABIL_MAVLINK_PORT", "COM15"),
-                         help="Matek'in bağlı olduğu COM portu (varsayılan COM15)")
+    parser.add_argument("--port", default=os.environ.get("EBABIL_MAVLINK_PORT", _DEFAULT_PORT),
+                         help=f"Matek'in bağlı olduğu port (varsayılan {_DEFAULT_PORT})")
     parser.add_argument("--baud", type=int, default=115200)
     args = parser.parse_args()
 
