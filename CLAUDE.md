@@ -36,35 +36,70 @@ ZMQ ile bu backend'lere bağlanır (portlar: 5555/5556/5557/5559/5560/5561).
 `gui/` klasörü buradaki repoda varsa bile ESKİ/TERK EDİLMİŞ bir kopyadır,
 `.gitignore`'da, dikkate alma.
 
-## ŞU AN NE YAPILIYOR: Windows'tan Ubuntu'ya taşıma
+## TAMAMLANDI: Windows'tan Ubuntu'ya taşıma
 
-Proje şimdiye kadar Windows'ta (RTL-SDR + 2x PlutoSDR ile) geliştirildi ve
-test edildi. Şu an kullanıcı **Ubuntu'ya (bedirhan-EXCALIBUR-G870) taşıyor**.
+Proje Windows'ta (RTL-SDR + 2x PlutoSDR ile) geliştirildi ve test edildi,
+sonra **Ubuntu'ya (bedirhan-EXCALIBUR-G870) taşındı ve orada uçtan uca
+DOĞRULANDI** (backend + GUI, gerçek RTL-SDR Blog V4 + 1x PlutoSDR + Matek
+telemetri kartıyla).
 
 Yapılanlar:
 - Bu repo ve GUI_QtCreator Ubuntu'ya `git clone` ile çekildi.
-- Python venv kuruldu, bağımlılıklar (pyzmq, numpy, scipy, tensorflow,
-  pyrtlsdr, pyadi-iio, sounddevice, pymavlink) pip ile kuruldu.
+- RTL-SDR/Pluto için udev/grup izni: `sudo usermod -aG plugdev,dialout $USER`
+  yapıldı (çıkış-giriş sonrası aktif oldu, `groups` ile doğrulandı).
+- **Python sürümü sorunu**: bu Ubuntu'da tek kurulu Python 3.14 idi,
+  TensorFlow'un pip'te henüz 3.14 wheel'i yok. Çözüm: deadsnakes PPA ile
+  `python3.12` kuruldu, venv ondan oluşturuldu (`python3.12 -m venv venv`).
+  Jetson/RPi'de muhtemelen bu sorun YOK (onlarda zaten eski Python geliyor,
+  bkz. aşağıdaki Jetson/RPi bölümü).
+- venv'e bağımlılıklar kuruldu: pyzmq, numpy, scipy, tensorflow, pyrtlsdr,
+  pyadi-iio, sounddevice, pymavlink, **+ pyserial** (CLAUDE.md'nin önceki
+  sürümünde unutulmuştu, `mavlink_bridge.py`/pymavlink seri port için
+  gerekiyor).
 - `models/` ve `data/aldatma_sesleri/` (gitignore'da oldukları için) Google
   Drive üzerinden zip'lenip manuel taşındı.
-- RTL-SDR/Pluto için udev/grup izni: `sudo usermod -aG plugdev,dialout $USER`
-  yapıldı (çıkış-giriş sonrası aktif olur).
+- **pyrtlsdr / Ubuntu librtlsdr uyumsuzluğu (ÖNEMLİ, kalıcı DEĞİL)**: Ubuntu
+  apt'teki `librtlsdr0` (osmocom mainline 2.0.2) `rtlsdr_set_dithering` ve
+  gpio fonksiyonlarını içermiyor (sadece rtlsdrblog fork'unda var), ama
+  pyrtlsdr 0.5.0 bunları hem import anında bağlamaya hem de HER `RtlSdr()`
+  açılışında çağırmaya çalışıyor -- ikisi de `AttributeError`/donanımla
+  gerçek çalıştırmada patlıyordu. Çözüm: venv içindeki
+  `site-packages/rtlsdr/librtlsdr.py` (sembol bağlama) ve `rtlsdr.py`
+  (`open()` içindeki `rtlsdr_set_dithering` çağrısı) sembol yoksa sessizce
+  atlayacak şekilde YAMALANDI -- proje bu fonksiyonları zaten hiç
+  kullanmıyor. **BU YAMA venv İÇİNDE, GİT'E COMMIT'LENMEDİ** -- venv silinip
+  yeniden kurulursa (`pip install --force-reinstall pyrtlsdr` dahil) tekrar
+  uygulanması gerekir, yoksa gerçek RTL-SDR açılışı yine patlar. Kalıcı/temiz
+  çözüm rtlsdrblog'un librtlsdr fork'unu kaynaktan derleyip kurmak olur ama
+  bu denenmedi (sudo + build gerektirir).
 - GUI_QtCreator'daki `CMakeLists.txt`, Linux'ta derlenebilsin diye düzeltildi:
   vcpkg/CONFIG tabanlı ZeroMQ bulma SADECE Windows'ta (`if(WIN32)`), Linux'ta
   `pkg_check_modules` ile `libzmq3-dev` (apt) üzerinden buluyor. cppzmq
   (`zmq.hpp`) Ubuntu'da paket olarak bulunamadı, GitHub'dan (v4.11.0)
   `/usr/local/include`'a manuel indirildi. GUI Ubuntu'da BAŞARIYLA DERLENDİ.
+- **Uçtan uca doğrulama YAPILDI**: `streamer.py` (RTL-SDR Blog V4) model
+  yükleyip tarama başlattı, port 5555/5556'dan gerçek SPEC verisi aktı;
+  `et_control.py` PlutoSDR TX'e (192.168.2.1) bağlandı; `mavlink_bridge.py`
+  Matek karttan (/dev/ttyACM0) heartbeat alıp port 5559'da yayına başladı;
+  `~/GUI_QtCreator/build/EHARPP` hepsine ZMQ üzerinden bağlandı ("BAĞLI"
+  yeşil, ED modunda hedef tespiti + waterfall, ET modunda karıştırma/aldatma
+  paneli ekran görüntüsüyle doğrulandı). `pluto_ed_scanner.py` test
+  EDİLEMEDİ -- ikinci bir PlutoSDR (192.168.3.1 bekliyor) henüz yok, elde
+  tek Pluto var.
+- Windows'ta yaşanan RTL-SDR/libusb donma sorunu bu testte GÖRÜLMEDİ ama
+  kısa süreli testti, uzun süreli kararlılık henüz kanıtlanmadı.
 
 ## SIRADAKİ ADIMLAR (buradan devam)
 
-1. Kullanıcı çıkış-giriş yapıp `groups` ile `plugdev`/`dialout`'u doğrulayacak.
-2. RTL-SDR/Pluto donanımını Ubuntu'ya takıp `python src/streamer.py` /
-   `python src/et_control.py` ile backend'i ilk kez Ubuntu'da test edecek.
-3. `~/GUI_QtCreator/build/EHARPP` ile GUI'yi açıp "BAĞLI" durumunu ve hedef
-   tespitini doğrulayacak.
-4. Bu, Ubuntu'da İLK gerçek uçtan uca test olacak -- Windows'ta yaşanan
-   RTL-SDR/libusb kararsızlığının (sık don ma, replug gerektirmesi) Linux'ta
-   muhtemelen DAHA AZ görüleceği bekleniyor ama doğrulanmadı.
+1. İkinci bir PlutoSDR edinilince `pluto_ed_scanner.py`'yi (2400-2483 MHz ED)
+   gerçek donanımla test et.
+2. Uzun süreli (saatler) çalıştırıp Ubuntu'da da RTL-SDR/libusb donması
+   yaşanıyor mu gözlemle -- `streamer_watchdog.py`'nin hâlâ gerekip
+   gerekmediğini bunun sonucuna göre değerlendir.
+3. Yarışma/saha koşullarında test (antenler arası mesafe, gerçek karışma
+   senaryoları).
+4. Sıradaki büyük hedef: Jetson Nano / Raspberry Pi'ye taşıma -- aşağıdaki
+   bölüme bak.
 
 ## GELECEK HEDEF: Jetson Nano ve Raspberry Pi (Ubuntu'dan sonra)
 
