@@ -76,9 +76,14 @@ BANDS = [
     # MHz'i hiç taramıyordu (kapsam boşluğu, hakem sinyali tam oraya
     # koyarsa tespit edilemezdi). 430-440 zaten 432.82-435.02'yi kapsayacak
     # kadar geniş, öyle bırakıldı.
-    {"name": "144-148", "start_mhz": 144.0, "stop_mhz": 148.0},
-    {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0},
-    {"name": "863-870", "start_mhz": 863.0, "stop_mhz": 870.0},
+    #
+    # rf_port: RTL-SDR girişindeki kamçı(144/433)/868 SP2T RF anahtarının bu
+    # bant için hangi porta alınması gerektiği (bkz. RtlRfAnahtari altta,
+    # yonKonum1905/parametreCikarimi/ebabil_sdr/main.cpp'deki C++ eşdeğeriyle
+    # AYNI kablolama kararı: 0=kamçı, 1=868 anten).
+    {"name": "144-148", "start_mhz": 144.0, "stop_mhz": 148.0, "rf_port": 0},
+    {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0, "rf_port": 0},
+    {"name": "863-870", "start_mhz": 863.0, "stop_mhz": 870.0, "rf_port": 1},
 ]
 
 DWELL_SAMPLE_RATE = 1024000  # izleme modu -- geniş anlık bant, kararlı/akan waterfall için
@@ -105,6 +110,80 @@ CLASSIFY_WINDOW = 128  # modelin beklediği pencere uzunluğu -- SEARCH_SAMPLE_R
 # örnekte güvenilir değil -- otokorelasyonun anlamlı olması için çok daha
 # geniş bir pencere gerekiyor (11 sınıfla doğrulanan test 5000 örnek kullandı).
 CLASSICAL_CHECK_WINDOW = 5000
+
+
+class RtlRfAnahtari:
+    """RTL-SDR RX girişindeki kamçı(144/433)/868 SP2T RF anahtarı -- TEK GPIO
+    hattı, ikili değer (bkz. yonKonum1905/parametreCikarimi/ebabil_sdr/main.cpp
+    içindeki GpiodRfAnahtari, C++ tarafındaki BİREBİR aynı mantık; bu proje
+    artık RTL-SDR taramasını C++ (ebabil_sdr) değil BU dosyayı çalıştırarak
+    yapıyor, o yüzden GERÇEK GPIO sürücüsü burada olmalı).
+
+    Gerçek GPIO chip/hat değeri FABRİKE VERİLMEZ -- yanlış bir pin gerçek
+    donanımda istenmeyen bir hattı tetikleyebilir (bkz. proje notları, aynı
+    karar etSunucu ve ebabil_sdr'de de alındı). EBABIL_RTL_RF_SWITCH_CHIP /
+    EBABIL_RTL_RF_SWITCH_HAT açıkça verilmezse anahtar YAPILANDIRILMAZ, anten
+    sabit kalır, net bir uyarı basılır -- kod çalışmaya devam eder."""
+
+    def __init__(self):
+        self._line = None
+        self._son_port = None
+
+        chip_adi = os.environ.get("EBABIL_RTL_RF_SWITCH_CHIP", "")
+        hat_metin = os.environ.get("EBABIL_RTL_RF_SWITCH_HAT", "")
+        if not chip_adi or not hat_metin:
+            print("[RTL RF ANAHTARI] YAPILANDIRILMADI (EBABIL_RTL_RF_SWITCH_CHIP/HAT verilmedi) -- "
+                  "anten sabit kalacak. Gerçek GPIO chip/hat numarasını switch modülünün "
+                  "kablolamasından doğrulayıp EBABIL_RTL_RF_SWITCH_CHIP (ör. gpiochip0) ve "
+                  "EBABIL_RTL_RF_SWITCH_HAT (ör. 17, BCM pin no) ile verin.")
+            return
+
+        try:
+            import gpiod  # python3-libgpiod (apt) -- C++ tarafıyla aynı libgpiod v1 API
+            chip = gpiod.Chip(chip_adi)
+            self._line = chip.get_line(int(hat_metin))
+            self._line.request(consumer="ebabil_rtl_rf_anahtari", type=gpiod.LINE_REQ_DIR_OUT,
+                                default_vals=[0])
+            print(f"[RTL RF ANAHTARI] Hazır (chip={chip_adi} hat={hat_metin}).")
+        except Exception as e:
+            print(f"[RTL RF ANAHTARI] AÇILAMADI (chip={chip_adi} hat={hat_metin}): {e} -- "
+                  "GPIO donanımı yok/hazır değil ya da hat geçersiz, anten sabit kalacak.")
+            self._line = None
+
+    def porta_gec(self, center_mhz):
+        """center_mhz'in BANDS'teki hangi banda düştüğünü bulup o bandın
+        rf_port'una geçer -- main.cpp'deki rtlAntenPortuBul ile aynı mantık.
+        Hiçbir banda denk gelmezse (olağan akışta olmamalı, tüm retune'lar
+        BANDS'ten üretilir) mevcut pozisyon KORUNUR."""
+        if self._line is None:
+            return
+        port = None
+        for band in BANDS:
+            if band["start_mhz"] <= center_mhz <= band["stop_mhz"]:
+                port = band.get("rf_port", 0)
+                break
+        if port is None or port == self._son_port:
+            return
+        try:
+            self._line.set_value(port)
+            self._son_port = port
+        except Exception as e:
+            print(f"[RTL RF ANAHTARI] port {port}'a geçiş başarısız: {e}")
+
+
+class RtlAntenliSdr(sdr_common.TunedSdr):
+    """TunedSdr'i (bkz. sdr_common.py) RF anten anahtarlamayla genişletir --
+    SADECE streamer.py'de kullanılır (RTL-SDR'a özel bir donanım detayı);
+    sdr_common pluto_ed_scanner.py ile ORTAK olduğu için bu detayı
+    TAŞIMAMALI, o yüzden ayrı bir alt sınıf olarak burada tutuluyor."""
+
+    def __init__(self, device, throwaway_samples, rf_anahtari):
+        super().__init__(device, throwaway_samples)
+        self._rf_anahtari = rf_anahtari
+
+    def tune(self, center_mhz, sample_rate):
+        self._rf_anahtari.porta_gec(center_mhz)
+        super().tune(center_mhz, sample_rate)
 
 
 def capture_power_spectrum(sdr, center_mhz, sample_rate):
@@ -438,8 +517,11 @@ def main():
     # atlıyor -- bkz. sdr_common.TunedSdr. Çağıran kod (aşağıdaki main döngüsü
     # ve capture_power_spectrum/handle_dinleme_capture/handle_classify_request/
     # handle_save_command) artık "hangi hızdayız" diye ayrıca takip etmiyor,
-    # sadece sdr.tune(freq, rate) der.
-    sdr = sdr_common.TunedSdr(RtlSdr(), throwaway_samples=THROWAWAY_SAMPLES)
+    # sadece sdr.tune(freq, rate) der. RtlAntenliSdr bunu genişletip HER
+    # tune() çağrısında RF anahtarını da (varsa) doğru porta alıyor -- tüm
+    # çağıranlar tek bir yerden (burada) otomatik doğru anteni kullanır.
+    rtl_rf_anahtari = RtlRfAnahtari()
+    sdr = RtlAntenliSdr(RtlSdr(), throwaway_samples=THROWAWAY_SAMPLES, rf_anahtari=rtl_rf_anahtari)
     sdr.gain = "auto"
 
     tracker = TargetTracker(match_tolerance_mhz=TARGET_MATCH_TOLERANCE_MHZ)

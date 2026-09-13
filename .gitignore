@@ -3,3 +3,4 @@
 /gui
 __pycache__/
 *.pyc
+/konum_servisi/build/
