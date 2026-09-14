@@ -14,6 +14,7 @@ numpy
 scipy
 pyzmq
 pymavlink
+pyserial
 pyrtlsdr
 pyadi-iio
 tensorflow
