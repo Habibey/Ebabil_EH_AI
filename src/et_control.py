@@ -34,7 +34,13 @@ Kritik Tasarım Raporu'ndaki (Bölüm 5) mimariyle hizalı ama KISITLI kapsam:
     kendiliğinden sonlandırır (KTR 5.2: "eşik altındaysa hedefin sonlandığı
     kabul edilir"). ASLA aynı anda TX+RX yapmaz -- ayrı bir thread'de
     (ana ZMQ komut döngüsünü bloklamaması için) sırayla TX/RX arasında geçer.
-  - 5.4 GNSS Aldatma: HENÜZ YOK -- GUI tarafında da komut yok.
+  - 5.4 GNSS Aldatma: DESTEKLENIYOR ama GERÇEK spoofing DEĞİL -- operatörün
+    seçtiği GNSS servis(ler)inin (GPS/GLONASS/GALILEO/BEIDOU, bkz.
+    GNSS_FREKANSLARI) taşıyıcı frekansında barrage-noise karıştırma (diğer
+    ET görevleriyle tutarlı bir kapsam kararı, bkz. proje notları). Protokol
+    AYNI "ET,BASLAT,GNSS_ALDATMA,<f1;f2;..>,<tip>" teli (yeni komut tipi
+    eklenmedi) -- GUI'nin seçili servisleri frekansa çevirip göndermesi
+    gerekiyor (bkz. mainwindow.cpp gnssAldatmaBaslatDurdur).
 
 GÜVENLİK: Varsayılan TX kazancı düşük tutulur (bkz. DEFAULT_TX_GAIN_DB).
 Bu takımın Pluto'su yazılımsal yamayla 70MHz-6GHz'e genişletildi (bkz.
@@ -113,6 +119,25 @@ ET_ANTEN_BANDLARI = [
     {"name": "868-915", "start_mhz": 860.0, "stop_mhz": 920.0, "port": 1},
     {"name": "GNSS-1.5G", "start_mhz": 1150.0, "stop_mhz": 1615.0, "port": 2},
 ]
+
+# GNSS Aldatma (madde 5.2.4) -- GERÇEK spoofing (sahte navigasyon mesajı/C-A
+# kodu üretimi) DEĞİL, diğer ET görevleriyle (5.1/5.2) tutarlı barrage-noise
+# karıştırma: operatörün GUI'den seçtiği servis(ler)in taşıyıcı frekansında
+# gürültü yayınlanır (bkz. handle_baslat -- "GNSS_ALDATMA" görev kodu, AYNI
+# "ET,BASLAT,<görev>,<f1;f2;..>,<tip>" telini kullanır, yeni bir komut tipi
+# eklemeye gerek yok). Frekanslar GUI'deki (mainwindow.cpp buildServisSatiri)
+# "servisAdi" property'siyle BİREBİR aynı isimlendirme ("<BAŞLIK> <servis>").
+GNSS_FREKANSLARI = {
+    "GPS L1": 1575.42, "GPS L2": 1227.60, "GPS L5": 1176.45,
+    "GLONASS L1": 1602.00, "GLONASS L2": 1246.00, "GLONASS L3": 1202.025,
+    "GALILEO E1": 1575.42, "GALILEO E5a": 1176.45, "GALILEO E5b": 1207.14, "GALILEO E6": 1278.75,
+    "BEIDOU B1": 1561.098, "BEIDOU B2": 1207.14, "BEIDOU B3": 1268.52,
+}
+# Operatör hiçbir servis seçmeden GNSS ALDATMAYI BAŞLAT'a basarsa (GUI bunu
+# geçerli bir durum sayıyor, bkz. mainwindow.cpp) -- sessiz kalmak yerine en
+# yaygın/kritik sivil GNSS taşıyıcısına (GPS L1) düşülür. Diğer ET
+# görevlerindeki "asla sessiz kalma" ilkesiyle tutarlı.
+GNSS_VARSAYILAN_SERVIS = "GPS L1"
 
 
 class PlutoEtRfAnahtari:
@@ -439,6 +464,52 @@ class PlutoTX:
         )
         self._arabakisli_thread.start()
 
+    def start_gnss(self, freqs_mhz, bw_hz=BARAJ_BW_HZ, dwell_s=1.5):
+        """GNSS Aldatma (madde 5.2.4) -- barrage-noise karıştırma, GERÇEK
+        spoofing DEĞİL (bkz. GNSS_FREKANSLARI yorumu). Seçilen servisler
+        (freqs_mhz) arasında zaman-bölmeli (round-robin) dolaşıp her birinde
+        dwell_s kadar gürültü yayınlar. arabakisli_loop'un aksine RX-sensing
+        YOK -- GNSS uydu sinyali "hedef hâlâ orada mı" diye dinlenecek bir
+        şey değil (her zaman mevcut kabul edilir), bu yüzden basit sürekli
+        döngü yeterli. Aynı durdurma mekanizmasını (self._arabakisli_stop_event/
+        _thread) paylaşır -- stop() zaten bunları görev-kodu-bağımsız yönetiyor."""
+        if not freqs_mhz:
+            print("[-] GNSS Aldatma: en az bir frekans gerekli.")
+            return
+        self.stop(silent=True)  # TX'i durdurur -- anten anahtarı güç kapalıyken geçilir
+        self.rf_anahtari.porta_gec(freqs_mhz[0])  # hepsi zaten GNSS-1.5G portuna düşüyor
+        waveform = generate_barrage_noise(bw_hz)
+        waveform_scaled = waveform / (np.max(np.abs(waveform)) + 1e-9) * 0.7 * (2 ** 14)
+        servis_metni = ", ".join(f"{f:.3f} MHz" for f in freqs_mhz)
+        print(f"[*] BAŞLATILIYOR (GNSS Aldatma -- karıştırma): {servis_metni} "
+              f"(dwell={dwell_s:.1f}s/servis, kazanç {self.gain_db:.1f} dB)")
+        self.active_gorev = "GNSS_ALDATMA"
+        self.active_freq_mhz = freqs_mhz[0]
+        self._arabakisli_stop_event = threading.Event()
+        self._arabakisli_thread = threading.Thread(
+            target=self._gnss_loop, args=(freqs_mhz, waveform_scaled, dwell_s, self._arabakisli_stop_event),
+            daemon=True,
+        )
+        self._arabakisli_thread.start()
+
+    def _gnss_loop(self, freqs_mhz, waveform_scaled, dwell_s, stop_event):
+        idx = 0
+        while not stop_event.is_set():
+            f_mhz = freqs_mhz[idx % len(freqs_mhz)]
+            if not DRY_RUN:
+                self.pluto.tx_lo = int(f_mhz * 1e6)
+                self.pluto.tx_hardwaregain_chan0 = self.gain_db
+                self.pluto.tx_destroy_buffer()
+                self.pluto.tx(waveform_scaled)
+            if stop_event.wait(dwell_s):
+                break
+            idx += 1
+        if not DRY_RUN and self.pluto is not None:
+            self.pluto.tx_destroy_buffer()
+        self.active_gorev = None
+        self.active_freq_mhz = None
+        print("[*] GNSS Aldatma görevi sona erdi.")
+
     def _check_target_present(self, freq_hz):
         """Kısa bir RX penceresi alıp streamer.py'nin detect_peak'iyle aynı
         mantıkla (medyan gürültü tabanı + eşik) hedefin hâlâ orada olup
@@ -535,6 +606,9 @@ def handle_baslat(tx, gorev_kodu, freqs_mhz, tip):
         audio = get_aldatma_audio(SAMPLE_RATE)
         waveform = generate_nbfm_deception(audio)
         tx.start(gorev_kodu, freqs_mhz[0], waveform)
+
+    elif gorev_kodu == "GNSS_ALDATMA":
+        tx.start_gnss(freqs_mhz)
 
     else:
         print(f"[-] Bilinmeyen görev kodu: {gorev_kodu} -- yok sayılıyor.")
