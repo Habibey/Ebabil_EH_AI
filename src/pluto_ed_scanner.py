@@ -69,6 +69,7 @@ import sdr_common
 import demod
 from predict import load_model_and_scalers, classify_iq_gated
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
+from tespit_kaydedici import TespitKaydedici
 
 DRY_RUN = os.environ.get("EBABIL_PLUTO_ED_DRY_RUN", "0") == "1"
 PLUTO_ED_IP = os.environ.get("EBABIL_PLUTO_ED_IP", "ip:192.168.3.1")
@@ -445,6 +446,7 @@ def main():
     # iki tarayıcının aynı anda çalışması bir sorun teşkil etmiyor.
     uav_konum = UavKonumDinleyici()
     konum_istemcisi = KonumIstemcisi()
+    tespit_kaydedici = TespitKaydedici(dosya_onek="pluto")
     varsayilan_scan_freqs = build_multi_band_scan_freqs()  # "bant varsayilan" ile buna geri dönülür
     scan_freqs = varsayilan_scan_freqs
     scan_idx = 0
@@ -653,6 +655,7 @@ def main():
                         ]
                         pub.send_string(",".join(sys_fields))
                         konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
+                        tespit_kaydedici.kaydet(tracker, tid)
 
                     if not dwelling and scan_idx >= len(scan_freqs):
                         scan_idx = 0

@@ -58,6 +58,7 @@ from predict import load_model_and_scalers, classify_iq_gated, CLASSES
 import sdr_common
 import demod
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
+from tespit_kaydedici import TespitKaydedici
 
 # --- Tarama ayarları ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
@@ -536,6 +537,11 @@ def main():
     uav_konum = UavKonumDinleyici()
     konum_istemcisi = KonumIstemcisi()
 
+    # Sürekli tespit loglama -- her SYS güncellemesini zaman damgasıyla
+    # data/tespit_gunlugu/'a ekler (bkz. tespit_kaydedici.py). GUI'den/ZMQ'dan
+    # bağımsız, sahada sonradan analiz için.
+    tespit_kaydedici = TespitKaydedici(dosya_onek="rtlsdr")
+
     # Bant aralığı artık çalışırken değiştirilebilir (bkz. aşağıdaki "bant" ve
     # "frekans" komutları) -- şartname madde 5.1.1: hakemler önce hiçbir şey
     # söylemez, hiçbir takım bulamazsa önce BANT sonra FREKANS açıklayabilir.
@@ -811,6 +817,7 @@ def main():
                         tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
                         pub.send_string(",".join(build_sys_fields(tracker, tid)))
                         konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
+                        tespit_kaydedici.kaydet(tracker, tid)
 
                 else:
                     # --- ARAMA: tüm bandı ince adımlarla dolaş ---
@@ -830,6 +837,7 @@ def main():
                         tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
                         pub.send_string(",".join(build_sys_fields(tracker, tid)))
                         konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
+                        tespit_kaydedici.kaydet(tracker, tid)
 
                     if scan_idx >= len(scan_freqs):
                         # Bir tam tur bitti -- operatör bir hedef SEÇTİYSE onun
