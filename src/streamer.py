@@ -59,6 +59,7 @@ import sdr_common
 import demod
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 from tespit_kaydedici import TespitKaydedici
+from sayisal_cozucu import SayisalCozucu
 
 # --- Tarama ayarları ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
@@ -351,6 +352,10 @@ class DinlemeOturumu:
         # örneğini burada tutup bir sonrakinin başına ekliyoruz (bkz.
         # demodle()), süreklilik sağlanıyor.
         self._iq_overlap = np.zeros(0, dtype=np.complex64)
+        # Sayısal (dijital) telsiz decode -- madde 5.1.3'ün opsiyonel kısmı
+        # (bkz. sayisal_cozucu.py). Oturum boyunca TEK multimon-ng alt süreci
+        # -- her baslat()'ta yeniden başlatmıyoruz, gereksiz.
+        self.sayisal_cozucu = SayisalCozucu(giris_sample_rate=demod.AUDIO_SAMPLE_RATE)
 
     def _audio_callback(self, outdata, frames, time_info, status):
         buf = self._leftover
@@ -399,6 +404,7 @@ class DinlemeOturumu:
             self.wav.writeframes(pcm16.tobytes())
         if self._audio_queue is not None:
             self._audio_queue.put(audio.astype(np.float32))
+        self.sayisal_cozucu.besle(audio.astype(np.float32))
 
     def demodle(self, raw_samples, fs_in, modulasyon_turu):
         """Yeni yakalanan ham örnekleri, bir önceki parçanın kuyruğuyla
@@ -433,7 +439,7 @@ class DinlemeOturumu:
         self.hedef_id = None
 
 
-def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma):
+def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma, pub):
     """Bir dinleme döngüsü adımı: freq_mhz'e kilitlenip DINLEME_BLOK_SURESI_S
     kadar örnek alır, hedefin son bilinen sınıflandırmasına göre demodüle
     eder, aktif DinlemeOturumu'na yazar/çalar. Ayrıca aynı örneklerden bir
@@ -457,6 +463,13 @@ def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma):
         mod = DINLEME_MOD_ZORUNLU
     audio = dinleme.demodle(samples, SEARCH_SAMPLE_RATE, mod)
     dinleme.isle(audio)
+
+    # Sayısal (dijital) telsiz decode -- madde 5.1.3'ün opsiyonel kısmı.
+    # metin virgül İÇEREBİLİR (multimon-ng çıktısı) -- GUI tarafında
+    # parseLine bunu section(',',2) ile TEK PARÇA okumalı (bkz. TelemetriGonderici.h
+    # notu, ayrı bir sabit alan sayısı beklenmiyor).
+    for metin in dinleme.sayisal_cozucu.oku():
+        pub.send_string(f"SAYISAL,{hedef_id},{metin}")
 
     return sdr_common.compute_power_spectrum(samples[:FFT_SIZE], freq_mhz, SEARCH_SAMPLE_RATE)
 
@@ -784,7 +797,7 @@ def main():
                     else:
                         dinleme_freq_mhz = tracker.known[dinleme_hedef_id]["freq_mhz"]
                         binned_db, bin_freqs_mhz, fs_mhz = handle_dinleme_capture(
-                            sdr, dinleme, dinleme_hedef_id, dinleme_freq_mhz, son_siniflandirma)
+                            sdr, dinleme, dinleme_hedef_id, dinleme_freq_mhz, son_siniflandirma, pub)
                         spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
                         pub.send_string(",".join(spec_fields))
 
