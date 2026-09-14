@@ -54,7 +54,17 @@ if sys.platform == "win32":
 
 from rtlsdr import RtlSdr
 
-from predict import load_model_and_scalers, classify_iq_gated, CLASSES
+import base64
+
+# SADECE CLASSES (statik sınıf listesi, "kaydet" komutunun etiket doğrulaması
+# için) -- load_model_and_scalers/classify_iq_gated artık BURADA çağrılmıyor.
+# AI sınıflandırması artık RPi'de DEĞİL, yerde (Jetson/PC) çalışıyor --
+# TensorFlow/tflite'ı RPi'nin belleğine hiç yüklemiyoruz (bkz. CLAUDE.md
+# "KARAR: AI Jetson'a taşındı" notu). handle_classify_request artık sadece
+# 128 örneklik IQ penceresini base64 metin olarak radyoya yolluyor,
+# yer_istasyonu_koprusu bunu ai_servisi.py'ye sorup "AI,..." sonucunu
+# GUI'ye kendisi basıyor.
+from predict import CLASSES
 import sdr_common
 import demod
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
@@ -267,12 +277,25 @@ def handle_save_command(sdr, tracker, args, selected_id=None):
     print(f"[+] Kaydedildi: {out_path} ({len(samples)} örnek, {len(samples) // 128} pencere üretilebilir)")
 
 
-def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std, selected_id=None,
-                             son_siniflandirma=None):
+def handle_classify_request(sdr, pub_ai, tracker, selected_id=None):
     """Sınıflandırma için her zaman SEARCH_SAMPLE_RATE'e döner -- model,
     fine-tuning verisi bu hızda toplandığı için buna göre eğitildi. Dwell
     modundaysak bile geçici olarak hıza döner, sonraki dwell/arama adımı
-    kendi hızını main() döngüsünde yeniden ayarlar."""
+    kendi hızını main() döngüsünde yeniden ayarlar.
+
+    ARTIK BURADA SINIFLANDIRMA YAPILMIYOR -- 128 örneklik IQ penceresi
+    base64 ile "IQ,<id>,<b64>" metin satırı olarak radyoya gönderiliyor
+    (seri_telemetri_koprusu.py bunu diğer satırlar gibi opak aktarır).
+    yer_istasyonu_koprusu (C++, yerde) bu satırı çözüp ai_servisi.py'ye
+    sorup "AI,..." sonucunu KENDİSİ yayınlıyor -- RPi TensorFlow/tflite'ı
+    hiç belleğe yüklemiyor. classical_I/Q çapraz kontrolü de KAPSAM DIŞI
+    (radyo hattı 5000 örneklik geniş pencereyi taşıyamaz, bkz. bant
+    genişliği hesabı) -- ai_servisi.py sadece güven eşiğiyle karar veriyor.
+
+    NOT: son_siniflandirma artık burada GÜNCELLENMİYOR (sonuç RPi'ye geri
+    dönmüyor) -- DİNLE modu artık EBABIL_DINLEME_MOD (DINLEME_MOD_ZORUNLU)
+    ile operatörün elle seçtiği türe göre demodüle ediyor (bkz. handle_dinleme_capture),
+    pluto_ed_scanner.py'deki AYNI kabul edilmiş kısıtlama."""
     tid = pick_target(tracker, selected_id)
     if tid is None:
         print("[!] Henüz tespit edilmiş hedef yok, sınıflandırma isteği atlandı.")
@@ -280,26 +303,10 @@ def handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_s
 
     freq_mhz = tracker.known[tid]["freq_mhz"]
     sdr.tune(freq_mhz, SEARCH_SAMPLE_RATE)
-    # Modelin gördüğü pencere (ilk CLASSIFY_WINDOW örnek) DEĞİŞMİYOR -- eğitimde
-    # kullanılanla birebir aynı kalsın diye. Geri kalanı SADECE klasik periyodiklik
-    # çapraz kontrolü için (bkz. predict.classify_iq_gated).
-    window_full = sdr.read_samples(CLASSICAL_CHECK_WINDOW)
-    window = window_full[:CLASSIFY_WINDOW]
-
-    I = np.real(window).astype(np.float32)
-    Q = np.imag(window).astype(np.float32)
-    classical_I = np.real(window_full).astype(np.float32)
-    classical_Q = np.imag(window_full).astype(np.float32)
-    analog_sayisal, mod, confidence = classify_iq_gated(
-        model, feature_mean, feature_std, I, Q, classical_I, classical_Q)
-
-    pub_ai.send_string(f"AI,{tid},{analog_sayisal},{mod}")
-    print(f"[>] {tid} ({freq_mhz:.3f} MHz) sınıflandırıldı: {mod} ({analog_sayisal}) - güven %{confidence:.1f}")
-
-    # Dinleme modu (bkz. handle_dinleme_capture) hangi demodülatörü
-    # kullanacağını bilsin diye son sınıflandırmayı hatırlıyoruz.
-    if son_siniflandirma is not None:
-        son_siniflandirma[tid] = (analog_sayisal, mod)
+    window = sdr.read_samples(CLASSIFY_WINDOW)
+    b64 = base64.b64encode(window.astype(np.complex64).tobytes()).decode("ascii")
+    pub_ai.send_string(f"IQ,{tid},{b64}")
+    print(f"[>] {tid} ({freq_mhz:.3f} MHz) için IQ penceresi yere gönderildi (sınıflandırma orada yapılacak).")
 
 
 def build_scan_freqs(start_mhz, stop_mhz):
@@ -522,9 +529,9 @@ def main():
     sub_cmd.connect(f"tcp://{gui_host}:5557")
     sub_cmd.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    print("[*] Model yükleniyor...")
-    model, feature_mean, feature_std = load_model_and_scalers()
-    print("[+] Model hazır.")
+    # Model ARTIK RPi'de yüklenmiyor (bkz. handle_classify_request) --
+    # TensorFlow/tflite'ı RPi'nin sınırlı belleğine/CPU'suna yüklemeden AI
+    # işi yerde (Jetson/PC, ai_servisi.py) yapılıyor.
 
     # TunedSdr, aynı frekans/hıza tekrar tekrar kilitlenmek istendiğinde
     # (DİNLE, sınıflandırma, dwell) gereksiz retune'u kendi içinde önbellekle
@@ -608,8 +615,7 @@ def main():
                 try:
                     msg = sub_cmd.recv_string(flags=zmq.NOBLOCK)
                     if msg == "SDR_VERISI_ISTEK":
-                        handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std,
-                                                 selected_target_id, son_siniflandirma)
+                        handle_classify_request(sdr, pub_ai, tracker, selected_target_id)
                     elif msg.startswith("ET,BASLAT,") or msg.startswith("ET,DURDUR,"):
                         # "ET,BASLAT,<görev_kodu>,<frekans_mhz>" / "ET,DURDUR,<görev_kodu>".
                         # ZMQ PUB/SUB fan-out olduğu için bu SATIR SADECE görünürlük/log

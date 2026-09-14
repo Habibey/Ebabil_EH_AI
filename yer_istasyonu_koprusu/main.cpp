@@ -310,6 +310,35 @@ std::vector<std::string> parcala(const std::string& s, char ayrac) {
     return parcalar;
 }
 
+// "IQ,<hedef_id>,<base64>" satirlarini cozmek icin -- streamer.py/
+// pluto_ed_scanner.py artik RPi'de siniflandirma yapmiyor (bkz. Ebabil_EH_AI
+// CLAUDE.md "AI Jetson'a tasindi"), 128 orneklik IQ penceresini base64
+// metin olarak buraya gonderiyor. Harici bir kutuphaneye bagimli olmamak
+// icin standart base64 cozme burada elle yazildi.
+std::vector<uint8_t> base64Coz(const std::string& metin) {
+    static const std::string tablo =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static std::vector<int> ters = [] {
+        std::vector<int> t(256, -1);
+        for (int i = 0; i < 64; ++i) t[static_cast<unsigned char>(tablo[i])] = i;
+        return t;
+    }();
+
+    std::vector<uint8_t> cikti;
+    int deger = 0, bit_sayisi = -8;
+    for (unsigned char c : metin) {
+        if (c == '=') break;
+        if (ters[c] == -1) continue;  // gecersiz/bosluk karakteri, atla
+        deger = (deger << 6) + ters[c];
+        bit_sayisi += 6;
+        if (bit_sayisi >= 0) {
+            cikti.push_back(static_cast<uint8_t>((deger >> bit_sayisi) & 0xFF));
+            bit_sayisi -= 8;
+        }
+    }
+    return cikti;
+}
+
 // ai_servisi.py'ye (Ebabil_EH_AI/src, Jetson'da ayni makinede calisir) ZMQ
 // REQ/REP ile baglanan istemci -- konum_servisi'nin Python istemcisiyle
 // (konum_istemcisi.py, KonumIstemcisi) AYNI "lazy pirate" deseni (REQ
@@ -518,7 +547,37 @@ int main() {
                 }
                 std::string satir = okuma_tamponu.substr(0, yeni_satir);
                 okuma_tamponu.erase(0, yeni_satir + 1);
-                if (!satir.empty()) {
+                if (satir.empty()) {
+                    // hicbir sey yapma, sadece asagidaki genel yayina dusme
+                } else if (satir.rfind("IQ,", 0) == 0) {
+                    // "IQ,<hedef_id>,<base64>" -- RPi artik siniflandirma
+                    // yapmiyor, burada ai_servisi.py'ye sorup sonucu KENDIMIZ
+                    // yayinliyoruz (bkz. base64Coz yorumu).
+                    const size_t virgul2 = satir.find(',', 3);
+                    if (virgul2 == std::string::npos) {
+                        std::cerr << "[KOPRU] Gecersiz IQ satiri (ikinci virgul yok): " << satir << "\n";
+                    } else {
+                        const std::string hedef_id = satir.substr(3, virgul2 - 3);
+                        const std::vector<uint8_t> ham = base64Coz(satir.substr(virgul2 + 1));
+                        if (ham.size() != PENCERE_BOYUTU * sizeof(std::complex<float>)) {
+                            std::cerr << "[KOPRU] IQ penceresi beklenmeyen boyutta (" << ham.size()
+                                      << " bayt) -- atlaniyor.\n";
+                        } else {
+                            std::vector<std::complex<float>> ornekler(PENCERE_BOYUTU);
+                            std::memcpy(ornekler.data(), ham.data(), ham.size());
+                            std::string analog_sayisal, mod, guven;
+                            if (ai_istemcisi.siniflandir(ornekler, analog_sayisal, mod, guven)) {
+                                const std::string ai_satiri = "AI," + hedef_id + "," + analog_sayisal + "," + mod;
+                                zmq::message_t ai_msg(ai_satiri.data(), ai_satiri.size());
+                                pub_ai.send(ai_msg, zmq::send_flags::dontwait);
+                                std::cout << "[KOPRU] " << ai_satiri << " (guven %" << guven << ")\n";
+                            } else {
+                                std::cerr << "[KOPRU] AI servisine ulasilamadi/zaman asimi -- "
+                                             "bu pencere icin siniflandirma atlaniyor.\n";
+                            }
+                        }
+                    }
+                } else {
                     zmq::message_t msg(satir.data(), satir.size());
                     pub.send(msg, zmq::send_flags::dontwait);
                 }

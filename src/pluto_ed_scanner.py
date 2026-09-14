@@ -67,7 +67,10 @@ except Exception:
 
 import sdr_common
 import demod
-from predict import load_model_and_scalers, classify_iq_gated
+import base64
+# predict.py artık burada import EDİLMİYOR -- AI sınıflandırması RPi'de değil
+# yerde (Jetson/PC, ai_servisi.py) yapılıyor, TensorFlow/tflite'ı RPi'nin
+# belleğine hiç yüklemiyoruz (bkz. streamer.py'deki AYNI karar/yorum).
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 from tespit_kaydedici import TespitKaydedici
 from sayisal_cozucu import SayisalCozucu
@@ -365,13 +368,13 @@ def _resample_to_classify_rate(iq, fs_in):
     return resample_poly(iq, ratio.numerator, ratio.denominator)
 
 
-def handle_classify_request(rx, pub_ai, tracker, model, feature_mean, feature_std, selected_id, son_siniflandirma):
-    """streamer.py'deki handle_classify_request ile aynı mantık, sadece
-    yakalama donanımı ve hızı farklı (bkz. CLASSIFY_CAPTURE_RATE). Sonuç
-    AI_PORT'tan streamer.py ile BİREBİR AYNI formatta yayınlanır:
-    AI,id,analogSayisal,modulasyonTuru -- GUI id'ye göre eşleştirdiği için
-    (bkz. mainwindow.cpp hedefYapayZekaGuncelle) PHEDEF-N kartları da bu
-    paketle güncellenir, arayüzde ayrıca bir değişiklik gerekmez."""
+def handle_classify_request(rx, pub_ai, tracker, selected_id):
+    """streamer.py'deki handle_classify_request ile AYNI karar: artık
+    burada sınıflandırma YAPILMIYOR -- 128 örneklik IQ penceresi base64 ile
+    "IQ,<id>,<b64>" metin satırı olarak radyoya gönderiliyor,
+    yer_istasyonu_koprusu bunu ai_servisi.py'ye sorup "AI,..." sonucunu
+    KENDİSİ yayınlıyor. classical_I/Q çapraz kontrolü KAPSAM DIŞI (bkz.
+    streamer.py'deki aynı gerekçe -- bant genişliği)."""
     tid = sdr_common.pick_target(tracker, selected_id)
     if tid is None:
         print("[!] Henüz tespit edilmiş hedef yok, sınıflandırma isteği atlandı.")
@@ -380,22 +383,11 @@ def handle_classify_request(rx, pub_ai, tracker, model, feature_mean, feature_st
     freq_mhz = tracker.known[tid]["freq_mhz"]
     raw_samples = rx.capture_raw(freq_mhz, CLASSIFY_CAPTURE_RATE, _CLASSIFY_RAW_SAMPLES)
     resampled = _resample_to_classify_rate(raw_samples, CLASSIFY_CAPTURE_RATE)
+    window = resampled[:CLASSIFY_WINDOW]
 
-    # Modelin gördüğü pencere (ilk CLASSIFY_WINDOW örnek) DEĞİŞMİYOR -- eğitimde
-    # kullanılanla birebir aynı kalsın diye. Geri kalanı SADECE klasik periyodiklik
-    # çapraz kontrolü için (bkz. predict.classify_iq_gated).
-    window_full = resampled[:CLASSICAL_CHECK_WINDOW]
-    window = window_full[:CLASSIFY_WINDOW]
-
-    I = np.real(window).astype(np.float32)
-    Q = np.imag(window).astype(np.float32)
-    classical_I = np.real(window_full).astype(np.float32)
-    classical_Q = np.imag(window_full).astype(np.float32)
-    analog_sayisal, mod, confidence = classify_iq_gated(
-        model, feature_mean, feature_std, I, Q, classical_I, classical_Q)
-
-    pub_ai.send_string(f"AI,{tid},{analog_sayisal},{mod}")
-    print(f"[>] {tid} ({freq_mhz:.3f} MHz) sınıflandırıldı: {mod} ({analog_sayisal}) - güven %{confidence:.1f}")
+    b64 = base64.b64encode(window.astype(np.complex64).tobytes()).decode("ascii")
+    pub_ai.send_string(f"IQ,{tid},{b64}")
+    print(f"[>] {tid} ({freq_mhz:.3f} MHz) için IQ penceresi yere gönderildi (sınıflandırma orada yapılacak).")
 
     if son_siniflandirma is not None:
         son_siniflandirma[tid] = (analog_sayisal, mod)
@@ -438,9 +430,7 @@ def main():
     sub_cmd.connect(f"tcp://127.0.0.1:{CMD_PORT}")
     sub_cmd.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    print("[*] Model yükleniyor...")
-    model, feature_mean, feature_std = load_model_and_scalers()
-    print("[+] Model hazır.")
+    # Model ARTIK RPi'de yüklenmiyor -- bkz. handle_classify_request.
 
     rx = PlutoRX()
     rx.connect()
@@ -495,8 +485,7 @@ def main():
                         _, target_id = msg.split("|")
                         command_queue.put(f"hedef {target_id}")
                     elif msg == "SDR_VERISI_ISTEK":
-                        handle_classify_request(rx, pub_ai, tracker, model, feature_mean, feature_std,
-                                                 selected_target_id, son_siniflandirma)
+                        handle_classify_request(rx, pub_ai, tracker, selected_target_id)
                     elif msg.startswith("DINLE_BASLAT|"):
                         try:
                             _, hedef_id = msg.split("|")
