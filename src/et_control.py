@@ -102,6 +102,91 @@ ARABAKISLI_MAX_MISSES = 3  # ard arda bu kadar "hedef yok" ölçümünden sonra 
 PLUTO_TX_MIN_HZ = float(os.environ.get("EBABIL_PLUTO_TX_MIN_HZ", 70e6))
 PLUTO_TX_MAX_HZ = float(os.environ.get("EBABIL_PLUTO_TX_MAX_HZ", 6e9))
 
+# Pluto TX çıkışının hangi antene (RF switch üzerinden) yönlendirileceğini
+# frekansa göre seçen tablo -- streamer.py'deki RtlRfAnahtari/BANDS'in ET
+# tarafındaki eşdeğeri. 3 anten: 144-433 dual-bant Yagi, 868-915 dual-bant
+# Yagi, ~1.5GHz helisel (GNSS L1/L2/L5 + GLONASS/Galileo/BeiDou hepsi bu
+# aralıkta -- bkz. GNSS_BAND_HZ altta). Port numaraları GERÇEK kablolamaya
+# göre EBABIL_ET_RF_SWITCH_HATLAR ile eşlenir (bkz. PlutoEtRfAnahtari).
+ET_ANTEN_BANDLARI = [
+    {"name": "144-433", "start_mhz": 140.0, "stop_mhz": 440.0, "port": 0},
+    {"name": "868-915", "start_mhz": 860.0, "stop_mhz": 920.0, "port": 1},
+    {"name": "GNSS-1.5G", "start_mhz": 1150.0, "stop_mhz": 1615.0, "port": 2},
+]
+
+
+class PlutoEtRfAnahtari:
+    """Pluto TX çıkışını 3 anten yolundan (144-433/868-915/1.5G GNSS Yagi+PA)
+    birine yönlendiren RF anahtarı -- streamer.py'deki RtlRfAnahtari ile AYNI
+    güvenli desen: gerçek GPIO chip/hat değerleri FABRİKE VERİLMEZ, açıkça
+    verilmezse anahtar YAPILANDIRILMAZ (anten sabit kalır, net uyarı basılır).
+
+    3 port için TEK bir ikili GPIO hattı yetmez -- her porta AYRI bir çıkış
+    hattı (aynı anda sadece biri HIGH) kullanılıyor; bu, ikili kodlamaya göre
+    donanım hatası durumunda geçersiz/beklenmeyen bir porta düşme riskini
+    azaltır (her hat kendi rölesini/anahtar konumunu doğrudan sürüyor).
+
+    GÜVENLİK: Port değişmeden ÖNCE PA'nın/TX'in aktif güç vermediğinden emin
+    olunmalı (sıcak anahtarlama switch'i bozabilir) -- bu sınıf SADECE hangi
+    hattın HIGH olacağını seçer, TX enable/disable sırası çağıran tarafın
+    (PlutoTX) sorumluluğundadır (bkz. PlutoTX.start/stop -- porta_gec()
+    HER ZAMAN tx_destroy_buffer()'dan SONRA, yeni tx()'ten ÖNCE çağrılır)."""
+
+    def __init__(self):
+        self._lines = None  # port_index -> gpiod Line
+        self._son_port = None
+
+        chip_adi = os.environ.get("EBABIL_ET_RF_SWITCH_CHIP", "")
+        hatlar_metin = os.environ.get("EBABIL_ET_RF_SWITCH_HATLAR", "")
+        if not chip_adi or not hatlar_metin:
+            print("[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- "
+                  "anten sabit kalacak. Gerçek GPIO chip/hat numaralarını (3 tane, virgülle ayrılmış, "
+                  "sırasıyla 144-433/868-915/GNSS-1.5G portlarına karşılık gelecek şekilde) "
+                  "EBABIL_ET_RF_SWITCH_CHIP (ör. gpiochip0) ve EBABIL_ET_RF_SWITCH_HATLAR "
+                  "(ör. 5,6,13) ile verin.")
+            return
+
+        hat_no_listesi = [h.strip() for h in hatlar_metin.split(",") if h.strip()]
+        if len(hat_no_listesi) != 3:
+            print(f"[ET RF ANAHTARI] AÇILAMADI: EBABIL_ET_RF_SWITCH_HATLAR tam 3 hat numarası "
+                  f"içermeli (144-433/868-915/GNSS-1.5G), {len(hat_no_listesi)} verildi -- anten sabit kalacak.")
+            return
+
+        try:
+            import gpiod  # python3-libgpiod (apt)
+            chip = gpiod.Chip(chip_adi)
+            self._lines = []
+            for hat_no in hat_no_listesi:
+                line = chip.get_line(int(hat_no))
+                line.request(consumer="ebabil_et_rf_anahtari", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+                self._lines.append(line)
+            print(f"[ET RF ANAHTARI] Hazır (chip={chip_adi} hatlar={hat_no_listesi}).")
+        except Exception as e:
+            print(f"[ET RF ANAHTARI] AÇILAMADI (chip={chip_adi} hatlar={hat_no_listesi}): {e} -- "
+                  "GPIO donanımı yok/hazır değil ya da hat geçersiz, anten sabit kalacak.")
+            self._lines = None
+
+    def porta_gec(self, freq_mhz):
+        """freq_mhz'in ET_ANTEN_BANDLARI'ndaki hangi banda düştüğünü bulup o
+        bandın portuna geçer -- streamer.py'deki RtlRfAnahtari.porta_gec ile
+        AYNI mantık. Hiçbir banda denk gelmezse (PLUTO_TX aralığı dışı özel
+        bir test frekansı vb.) mevcut pozisyon KORUNUR."""
+        if self._lines is None:
+            return
+        port = None
+        for band in ET_ANTEN_BANDLARI:
+            if band["start_mhz"] <= freq_mhz <= band["stop_mhz"]:
+                port = band["port"]
+                break
+        if port is None or port == self._son_port:
+            return
+        try:
+            for i, line in enumerate(self._lines):
+                line.set_value(1 if i == port else 0)
+            self._son_port = port
+        except Exception as e:
+            print(f"[ET RF ANAHTARI] port {port}'a geçiş başarısız: {e}")
+
 ALDATMA_SES_DIZINI = os.path.join(_REPO_ROOT, "data", "aldatma_sesleri")
 
 # Piper TTS -- yerel/cevrimdisi, Turkce ses modeli. pip install piper-tts +
@@ -277,6 +362,7 @@ class PlutoTX:
         self.gain_db = DEFAULT_TX_GAIN_DB
         self._arabakisli_stop_event = None
         self._arabakisli_thread = None
+        self.rf_anahtari = PlutoEtRfAnahtari()
 
     def connect(self):
         if DRY_RUN:
@@ -302,7 +388,8 @@ class PlutoTX:
             print(f"[-] {freq_mhz} MHz, Pluto TX aralığının ({PLUTO_TX_MIN_HZ/1e6:.0f}-{PLUTO_TX_MAX_HZ/1e6:.0f} MHz) "
                   f"DIŞINDA -- bu script atlıyor.")
             return
-        self.stop(silent=True)
+        self.stop(silent=True)  # TX'i (varsa) durdurur -- anten anahtarı GÜÇ KAPALIYKEN geçilir
+        self.rf_anahtari.porta_gec(freq_mhz)
         waveform_scaled = waveform / (np.max(np.abs(waveform)) + 1e-9) * 0.7 * (2 ** 14)
         print(f"[*] BAŞLATILIYOR: {gorev_kodu} @ {freq_mhz:.6f} MHz (kazanç {self.gain_db:.1f} dB)")
         if not DRY_RUN:
@@ -373,6 +460,10 @@ class PlutoTX:
 
     def _arabakisli_loop(self, freqs_mhz, bw_hz, stop_event):
         lo_mhz = sum(freqs_mhz) / len(freqs_mhz)
+        # lo_mhz döngü boyunca sabit kalıyor -- anten portu bir kere seçilir,
+        # TX zaten stop(silent=True) ile kapalı haldeyken (start_arabakisli
+        # çağrısında) geçiliyor, sıcak anahtarlama riski yok.
+        self.rf_anahtari.porta_gec(lo_mhz)
         if len(freqs_mhz) > 1:
             span_hz = (max(freqs_mhz) - min(freqs_mhz)) * 1e6
             if span_hz > SAMPLE_RATE * 0.8:
