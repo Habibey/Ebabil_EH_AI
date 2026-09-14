@@ -57,6 +57,7 @@ from rtlsdr import RtlSdr
 from predict import load_model_and_scalers, classify_iq_gated, CLASSES
 import sdr_common
 import demod
+from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 
 # --- Tarama ayarları ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
@@ -70,9 +71,19 @@ SEARCH_STEP_MHZ = SEARCH_SAMPLE_RATE / 1e6  # örtüşmesiz, kanal genişliği k
 # 2400-2483 MHz burada YOK -- RTL-SDR (R828D tuner) donanımsal olarak ~1.7GHz'in
 # üzerine çıkamıyor, o bant sadece Pluto/pluto_ed_scanner.py'de taranabiliyor.
 BANDS = [
-    {"name": "143-145", "start_mhz": 143.0, "stop_mhz": 145.0},
-    {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0},
-    {"name": "868-870", "start_mhz": 868.0, "stop_mhz": 870.0},
+    # Resmi bant tablosuyla (KTR) birebir: 144-148 (VHF amatör), 863-870
+    # (ISM 868) -- önceki 143-145/868-870 aralıkları 145-148 MHz ve 863-868
+    # MHz'i hiç taramıyordu (kapsam boşluğu, hakem sinyali tam oraya
+    # koyarsa tespit edilemezdi). 430-440 zaten 432.82-435.02'yi kapsayacak
+    # kadar geniş, öyle bırakıldı.
+    #
+    # rf_port: RTL-SDR girişindeki kamçı(144/433)/868 SP2T RF anahtarının bu
+    # bant için hangi porta alınması gerektiği (bkz. RtlRfAnahtari altta,
+    # yonKonum1905/parametreCikarimi/ebabil_sdr/main.cpp'deki C++ eşdeğeriyle
+    # AYNI kablolama kararı: 0=kamçı, 1=868 anten).
+    {"name": "144-148", "start_mhz": 144.0, "stop_mhz": 148.0, "rf_port": 0},
+    {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0, "rf_port": 0},
+    {"name": "863-870", "start_mhz": 863.0, "stop_mhz": 870.0, "rf_port": 1},
 ]
 
 DWELL_SAMPLE_RATE = 1024000  # izleme modu -- geniş anlık bant, kararlı/akan waterfall için
@@ -99,6 +110,80 @@ CLASSIFY_WINDOW = 128  # modelin beklediği pencere uzunluğu -- SEARCH_SAMPLE_R
 # örnekte güvenilir değil -- otokorelasyonun anlamlı olması için çok daha
 # geniş bir pencere gerekiyor (11 sınıfla doğrulanan test 5000 örnek kullandı).
 CLASSICAL_CHECK_WINDOW = 5000
+
+
+class RtlRfAnahtari:
+    """RTL-SDR RX girişindeki kamçı(144/433)/868 SP2T RF anahtarı -- TEK GPIO
+    hattı, ikili değer (bkz. yonKonum1905/parametreCikarimi/ebabil_sdr/main.cpp
+    içindeki GpiodRfAnahtari, C++ tarafındaki BİREBİR aynı mantık; bu proje
+    artık RTL-SDR taramasını C++ (ebabil_sdr) değil BU dosyayı çalıştırarak
+    yapıyor, o yüzden GERÇEK GPIO sürücüsü burada olmalı).
+
+    Gerçek GPIO chip/hat değeri FABRİKE VERİLMEZ -- yanlış bir pin gerçek
+    donanımda istenmeyen bir hattı tetikleyebilir (bkz. proje notları, aynı
+    karar etSunucu ve ebabil_sdr'de de alındı). EBABIL_RTL_RF_SWITCH_CHIP /
+    EBABIL_RTL_RF_SWITCH_HAT açıkça verilmezse anahtar YAPILANDIRILMAZ, anten
+    sabit kalır, net bir uyarı basılır -- kod çalışmaya devam eder."""
+
+    def __init__(self):
+        self._line = None
+        self._son_port = None
+
+        chip_adi = os.environ.get("EBABIL_RTL_RF_SWITCH_CHIP", "")
+        hat_metin = os.environ.get("EBABIL_RTL_RF_SWITCH_HAT", "")
+        if not chip_adi or not hat_metin:
+            print("[RTL RF ANAHTARI] YAPILANDIRILMADI (EBABIL_RTL_RF_SWITCH_CHIP/HAT verilmedi) -- "
+                  "anten sabit kalacak. Gerçek GPIO chip/hat numarasını switch modülünün "
+                  "kablolamasından doğrulayıp EBABIL_RTL_RF_SWITCH_CHIP (ör. gpiochip0) ve "
+                  "EBABIL_RTL_RF_SWITCH_HAT (ör. 17, BCM pin no) ile verin.")
+            return
+
+        try:
+            import gpiod  # python3-libgpiod (apt) -- C++ tarafıyla aynı libgpiod v1 API
+            chip = gpiod.Chip(chip_adi)
+            self._line = chip.get_line(int(hat_metin))
+            self._line.request(consumer="ebabil_rtl_rf_anahtari", type=gpiod.LINE_REQ_DIR_OUT,
+                                default_vals=[0])
+            print(f"[RTL RF ANAHTARI] Hazır (chip={chip_adi} hat={hat_metin}).")
+        except Exception as e:
+            print(f"[RTL RF ANAHTARI] AÇILAMADI (chip={chip_adi} hat={hat_metin}): {e} -- "
+                  "GPIO donanımı yok/hazır değil ya da hat geçersiz, anten sabit kalacak.")
+            self._line = None
+
+    def porta_gec(self, center_mhz):
+        """center_mhz'in BANDS'teki hangi banda düştüğünü bulup o bandın
+        rf_port'una geçer -- main.cpp'deki rtlAntenPortuBul ile aynı mantık.
+        Hiçbir banda denk gelmezse (olağan akışta olmamalı, tüm retune'lar
+        BANDS'ten üretilir) mevcut pozisyon KORUNUR."""
+        if self._line is None:
+            return
+        port = None
+        for band in BANDS:
+            if band["start_mhz"] <= center_mhz <= band["stop_mhz"]:
+                port = band.get("rf_port", 0)
+                break
+        if port is None or port == self._son_port:
+            return
+        try:
+            self._line.set_value(port)
+            self._son_port = port
+        except Exception as e:
+            print(f"[RTL RF ANAHTARI] port {port}'a geçiş başarısız: {e}")
+
+
+class RtlAntenliSdr(sdr_common.TunedSdr):
+    """TunedSdr'i (bkz. sdr_common.py) RF anten anahtarlamayla genişletir --
+    SADECE streamer.py'de kullanılır (RTL-SDR'a özel bir donanım detayı);
+    sdr_common pluto_ed_scanner.py ile ORTAK olduğu için bu detayı
+    TAŞIMAMALI, o yüzden ayrı bir alt sınıf olarak burada tutuluyor."""
+
+    def __init__(self, device, throwaway_samples, rf_anahtari):
+        super().__init__(device, throwaway_samples)
+        self._rf_anahtari = rf_anahtari
+
+    def tune(self, center_mhz, sample_rate):
+        self._rf_anahtari.porta_gec(center_mhz)
+        super().tune(center_mhz, sample_rate)
 
 
 def capture_power_spectrum(sdr, center_mhz, sample_rate):
@@ -398,6 +483,8 @@ def build_sys_fields(tracker, tid):
 # pick_target artık sdr_common'da -- pluto_ed_scanner.py ile ORTAK (aynı
 # "seçili hedef yoksa en güçlüye düş" davranışı iki dosyada da isteniyor).
 pick_target = sdr_common.pick_target
+# konum_guncelle_ve_gonder de aynı şekilde konum_istemcisi'nde -- pluto_ed_scanner.py
+# ile ORTAK (bkz. o dosyadaki import).
 
 
 def main():
@@ -430,11 +517,24 @@ def main():
     # atlıyor -- bkz. sdr_common.TunedSdr. Çağıran kod (aşağıdaki main döngüsü
     # ve capture_power_spectrum/handle_dinleme_capture/handle_classify_request/
     # handle_save_command) artık "hangi hızdayız" diye ayrıca takip etmiyor,
-    # sadece sdr.tune(freq, rate) der.
-    sdr = sdr_common.TunedSdr(RtlSdr(), throwaway_samples=THROWAWAY_SAMPLES)
+    # sadece sdr.tune(freq, rate) der. RtlAntenliSdr bunu genişletip HER
+    # tune() çağrısında RF anahtarını da (varsa) doğru porta alıyor -- tüm
+    # çağıranlar tek bir yerden (burada) otomatik doğru anteni kullanır.
+    rtl_rf_anahtari = RtlRfAnahtari()
+    sdr = RtlAntenliSdr(RtlSdr(), throwaway_samples=THROWAWAY_SAMPLES, rf_anahtari=rtl_rf_anahtari)
     sdr.gain = "auto"
 
     tracker = TargetTracker(match_tolerance_mhz=TARGET_MATCH_TOLERANCE_MHZ)
+
+    # Yön bulma + konum kestirimi (madde 5.1.4/5.1.5) -- anten çifti donanımı
+    # YOK (tek anten, doğrulandı), bu yüzden "menzil-only": gerçek RSSI +
+    # gerçek İHA konumu (mavlink_bridge.py'den) konum_servisi'ne (C++ PF/EKF)
+    # gönderiliyor, o da hedef konumu + türetilmiş açıyı döndürüyor (bkz.
+    # konum_istemcisi.py). İkisi de arka planda/best-effort -- mavlink_bridge
+    # ya da konum_servisi henüz çalışmıyorsa DF satırı basitçe gönderilmez,
+    # SYS/SPEC akışı etkilenmez.
+    uav_konum = UavKonumDinleyici()
+    konum_istemcisi = KonumIstemcisi()
 
     # Bant aralığı artık çalışırken değiştirilebilir (bkz. aşağıdaki "bant" ve
     # "frekans" komutları) -- şartname madde 5.1.1: hakemler önce hiçbir şey
@@ -492,13 +592,14 @@ def main():
                         handle_classify_request(sdr, pub_ai, tracker, model, feature_mean, feature_std,
                                                  selected_target_id, son_siniflandirma)
                     elif msg.startswith("ET,BASLAT,") or msg.startswith("ET,DURDUR,"):
-                        # Takım arkadaşımızın et_kontrol (Desktop/ET/) protokolüyle
-                        # aynı format: "ET,BASLAT,<görev_kodu>,<frekans_mhz>" /
-                        # "ET,DURDUR,<görev_kodu>". Henüz gerçek bir verici/et_kontrol
-                        # bu tarafta çalışmıyor, sadece logluyoruz.
-                        print(f"[*] ET komutu alındı (henüz vericiye bağlı değil): {msg}")
+                        # "ET,BASLAT,<görev_kodu>,<frekans_mhz>" / "ET,DURDUR,<görev_kodu>".
+                        # ZMQ PUB/SUB fan-out olduğu için bu SATIR SADECE görünürlük/log
+                        # amaçlı -- gerçek Pluto TX (karıştırma/aldatma) et_control.py'nin
+                        # AYRI süreci tarafından yapılıyor, o da aynı 5557 komut kanalına
+                        # bağımsız SUB olarak dinliyor (burada tekrar TX tetiklenmiyor).
+                        print(f"[*] ET komutu alındı (SYS/SPEC tarafı sadece logluyor, TX et_control.py'de): {msg}")
                     elif msg.startswith("SET_POWER "):
-                        print(f"[*] Çıkış gücü ayarı alındı (henüz vericiye bağlı değil): {msg}")
+                        print(f"[*] Çıkış gücü ayarı alındı (SYS/SPEC tarafı sadece logluyor, TX et_control.py'de): {msg}")
                     elif msg == "BANT_VARSAYILAN":
                         command_queue.put("bant varsayilan")
                     elif msg.startswith("BANT_AYARLA|"):
@@ -709,6 +810,7 @@ def main():
                         sapma_mhz = freq_mhz - dwell_center_mhz
                         tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
                         pub.send_string(",".join(build_sys_fields(tracker, tid)))
+                        konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
 
                 else:
                     # --- ARAMA: tüm bandı ince adımlarla dolaş ---
@@ -727,6 +829,7 @@ def main():
                         sapma_mhz = freq_mhz - center_mhz
                         tid = tracker.update(freq_mhz, power_db, bandwidth_khz, snr_db, sapma_mhz)
                         pub.send_string(",".join(build_sys_fields(tracker, tid)))
+                        konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
 
                     if scan_idx >= len(scan_freqs):
                         # Bir tam tur bitti -- operatör bir hedef SEÇTİYSE onun

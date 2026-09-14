@@ -1,8 +1,10 @@
 """
-İKİNCİ PlutoSDR'ı RX olarak kullanıp 868-870 MHz ve 2.4-2.483 GHz bantlarını
-hoplayarak tarayan ED (Elektronik Destek) süreci -- streamer.py'nin RTL-SDR
-(144/433 MHz) tarafına ek, KTR'de tanımlı ama şu ana kadar kodda hiç var
-olmayan üst-bant tarama zincirini gerçekleştirir.
+İKİNCİ PlutoSDR'ı RX olarak kullanıp 144-148 MHz, 430-440 MHz, 863-870 MHz,
+2.4-2.483 GHz ve 5.725-5.875 GHz bantlarını hoplayarak tarayan ED (Elektronik
+Destek) süreci -- streamer.py'nin RTL-SDR (144/433/868 MHz) tarafına ek, KTR'de
+tanımlı ama şu ana kadar kodda hiç var olmayan üst-bant (2.4G/5.8G) tarama
+zincirini gerçekleştirir (alt bantlar sahada test amaçlı ayrıca burada da
+taranıyor, bkz. BANDS altındaki not).
 
 Neden AYRI süreç ve AYRI Pluto: et_control.py'deki Pluto TX (ET/karıştırma)
 ile bu Pluto RX (ED/tarama) AYNI ANDA çalışmalı -- aynı Pluto'da hem TX hem RX
@@ -66,6 +68,7 @@ except Exception:
 import sdr_common
 import demod
 from predict import load_model_and_scalers, classify_iq_gated
+from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 
 DRY_RUN = os.environ.get("EBABIL_PLUTO_ED_DRY_RUN", "0") == "1"
 PLUTO_ED_IP = os.environ.get("EBABIL_PLUTO_ED_IP", "ip:192.168.3.1")
@@ -88,10 +91,17 @@ DINLEME_VARSAYILAN_MOD = os.environ.get("EBABIL_PLUTO_DINLEME_MOD", "WBFM")
 # pencerelerin %75 örtüşmesini sağlıyor -- hiçbir frekans artık iki pencere
 # arasında "kenarda" kalmıyor.
 BANDS = [
-    {"name": "143-145", "start_mhz": 143.0, "stop_mhz": 145.0, "step_mhz": 0.5},
+    # 143-145/868-870 -> 144-148/863-870 (resmi bant tablosuyla birebir --
+    # önceki aralıklar 145-148 MHz ve 863-868 MHz'i hiç taramıyordu, kapsam
+    # boşluğu). 5725-5875 (ISM 5.8G) eklendi -- Pluto (Rev.C, firmware
+    # unlock ile 6GHz'e kadar) fiziksel olarak buraya çıkabiliyor,
+    # ebabil_sdr/main.cpp'deki pluto_bantlar tablosunda zaten taranıyor,
+    # burada eksikti.
+    {"name": "144-148", "start_mhz": 144.0, "stop_mhz": 148.0, "step_mhz": 0.5},
     {"name": "430-440", "start_mhz": 430.0, "stop_mhz": 440.0, "step_mhz": 0.5},
-    {"name": "868-870", "start_mhz": 868.0, "stop_mhz": 870.0, "step_mhz": 1.0},
+    {"name": "863-870", "start_mhz": 863.0, "stop_mhz": 870.0, "step_mhz": 1.0},
     {"name": "2400-2483", "start_mhz": 2400.0, "stop_mhz": 2483.0, "step_mhz": 1.0},
+    {"name": "5725-5875", "start_mhz": 5725.0, "stop_mhz": 5875.0, "step_mhz": 2.0},
 ]
 
 SEARCH_SAMPLE_RATE = 2_000_000  # arama modu -- Pluto'nun genis RX bandini kullanip az adimda tara
@@ -428,6 +438,13 @@ def main():
     rx.connect()
 
     tracker = sdr_common.TargetTracker(id_prefix="PHEDEF")  # streamer.py'nin HEDEF-N'iyle karışmasın
+
+    # Yön bulma + konum kestirimi -- streamer.py'deki AYNI mekanizma (bkz. o
+    # dosyadaki yorum ve konum_istemcisi.py). konum_servisi PHEDEF-N ve
+    # HEDEF-N'i ayrı hedefler olarak (farklı string id) takip ettiği için
+    # iki tarayıcının aynı anda çalışması bir sorun teşkil etmiyor.
+    uav_konum = UavKonumDinleyici()
+    konum_istemcisi = KonumIstemcisi()
     varsayilan_scan_freqs = build_multi_band_scan_freqs()  # "bant varsayilan" ile buna geri dönülür
     scan_freqs = varsayilan_scan_freqs
     scan_idx = 0
@@ -635,6 +652,7 @@ def main():
                             f"{sapma_mhz:.4f}", f"{power_db - snr_db:.2f}", f"{snr_db:.2f}", sureklilik,
                         ]
                         pub.send_string(",".join(sys_fields))
+                        konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, power_db)
 
                     if not dwelling and scan_idx >= len(scan_freqs):
                         scan_idx = 0

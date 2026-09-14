@@ -130,6 +130,42 @@ Farklılıklar/dikkat edilecekler:
   birlikte "backend uzakta, GUI ayrı makinede" senaryosunu aktif eder (kod
   zaten buna göre yazılmıştı, hiç değişiklik gerekmez).
 
+## YÖN BULMA + KONUM KESTİRİMİ eklendi (2026-09-14)
+
+Bu repoda eksik olan tek şey (yön bulma/konum kestirimi, madde 5.1.4/5.1.5)
+artık entegre edildi -- Python'da YENİDEN YAZILMADI, ekibin ayrı bir C++
+reposundaki (yonKonum1905/yon_bulma + konum_kestirimi, zaten yazılıp test
+edilmiş Parçacık Filtresi + EKF) kod, küçük bir ZMQ servisi
+(`yonKonum1905/konum_servisi`, port 5570, REQ/REP) olarak dışarı açıldı.
+
+- `src/konum_istemcisi.py` (YENİ) -- `UavKonumDinleyici` (mavlink_bridge.py'nin
+  5559'unu dinler, en son gerçek İHA konumunu tutar) ve `KonumIstemcisi`
+  (konum_servisi'ne ZMQ REQ ile bağlanır) sınıfları + `konum_guncelle_ve_gonder()`
+  yardımcısı. `streamer.py` ve `pluto_ed_scanner.py` ORTAK kullanıyor.
+- `streamer.py`/`pluto_ed_scanner.py`: her SYS güncellemesinden sonra
+  `konum_guncelle_ve_gonder()` çağrılıyor -- gerçek RSSI + gerçek İHA
+  konumu (mavlink_bridge üzerinden) konum_servisi'ne gönderilip, PF/EKF
+  geçerli bir konum ürettiyse "DF,<tid>,IHA_MENZIL,<açı>,<rms>,<lat>,<lon>"
+  satırı aynı SYS/SPEC portundan (5555/5560) yayınlanıyor.
+- **NEDEN "menzil-only" (açı doğrudan ÖLÇÜLMÜYOR):** Anten çifti donanımı
+  YOK (tek anten, doğrulandı) -- bu yüzden sağ-sol RSSI karşılaştırmasıyla
+  açı ölçümü fiziksel olarak mümkün değil. Bunun yerine: gerçek RSSI +
+  İHA'nın (spiral rota ile) farklı noktalardan geçtiği gerçek GPS konumları
+  Parçacık Filtresi'ne "bearing güveni sıfır" ile besleniyor, açı PF/EKF'nin
+  bulduğu hedef konumundan SONRADAN (atan2 ile) türetiliyor.
+- **ÇALIŞTIRMAK İÇİN EK ADIM:** `streamer.py`/`pluto_ed_scanner.py`'den önce
+  (ya da yanında) `yonKonum1905/konum_servisi/build/konum_servisi` da
+  çalışıyor olmalı (aynı makinede, port 5570) -- çalışmıyorsa DF satırı
+  sessizce hiç gönderilmez, SYS/SPEC akışı etkilenmez (best-effort).
+  `EBABIL_DF_REF_LAT`/`EBABIL_DF_REF_LON` (varsayılan: 39.9250000/32.8369960)
+  yarışma alanının gerçek referans noktasıyla güncellenmeli.
+- `ihaRota/` (YENİ) -- İHA'nın uçacağı gerçek arama deseni: Arşimet spiral
+  (`yonca_gorev_uret.py`, üretilmiş `yonca_gorevi.waypoints`). Konum
+  kestiriminin (yukarıdaki PF) iyi yakınsaması için İHA'nın FARKLI
+  noktalardan geçmesi şart -- bu rota tam bunu sağlamak için tasarlandı
+  (4/8 yapraklı gül eğrisi denemeleri ölçülüp elenmiş, script içindeki
+  yorumlarda gerekçesi var).
+
 ## Bilinen tuhaflıklar / geçmişten notlar
 
 - RTL-SDR Windows'ta sık sık donup USB'den kayboluyordu (libusb kararsızlığı,
