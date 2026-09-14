@@ -434,6 +434,7 @@ def main():
 
     dwelling = False
     dwell_center_mhz = None
+    dwell_target_id = None  # otomatik modda pick_target()'ın histerezisi için "şu an kilitli hedef"
     dwell_started_at = 0.0
     dwell_locked = False
     selected_target_id = None
@@ -549,6 +550,7 @@ def main():
                             print("[!] Kullanım: hedef <id>  |  hedef oto")
                         elif parts[1].upper() in ("OTO", "OTOMATIK"):
                             selected_target_id = None
+                            dwell_target_id = None
                             dwelling = False
                             dwell_locked = False
                             scan_idx = 0
@@ -559,6 +561,7 @@ def main():
                                 print(f"[!] {target_id} bilinmiyor (bilinenler: {', '.join(tracker.known) or '(yok)'})")
                             else:
                                 selected_target_id = target_id
+                                dwell_target_id = target_id
                                 raw_freq = tracker.known[target_id]["freq_mhz"]
                                 dwell_center_mhz = round(raw_freq / DWELL_SNAP_MHZ) * DWELL_SNAP_MHZ
                                 dwelling = True
@@ -635,8 +638,11 @@ def main():
 
                     if not dwelling and scan_idx >= len(scan_freqs):
                         scan_idx = 0
-                        lock_target = sdr_common.pick_target(tracker, selected_target_id)
+                        # current_id=dwell_target_id ile histerezis -- streamer.py'deki
+                        # aynı mantık (bkz. sdr_common.pick_target / CLAUDE.md).
+                        lock_target = sdr_common.pick_target(tracker, selected_target_id, dwell_target_id)
                         if lock_target is not None:
+                            dwell_target_id = lock_target
                             raw_freq = tracker.known[lock_target]["freq_mhz"]
                             dwell_center_mhz = round(raw_freq / DWELL_SNAP_MHZ) * DWELL_SNAP_MHZ
                             dwelling = True

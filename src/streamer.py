@@ -448,6 +448,7 @@ def main():
 
     dwelling = False
     dwell_center_mhz = None
+    dwell_target_id = None  # otomatik modda pick_target()'ın histerezisi için "şu an kilitli hedef"
     dwell_started_at = 0.0
     dwell_locked = False  # "frekans" komutuyla kilitlendiyse DWELL_DURATION_S sonra arama moduna dönmez
 
@@ -622,6 +623,7 @@ def main():
                             print("[!] Kullanım: hedef <id>  (örn: hedef HEDEF-2)  |  hedef oto")
                         elif parts[1].upper() in ("OTO", "OTOMATIK"):
                             selected_target_id = None
+                            dwell_target_id = None
                             dwelling = False
                             dwell_locked = False
                             scan_idx = 0
@@ -633,6 +635,7 @@ def main():
                                       f"(bilinen hedefler: {', '.join(tracker.known) or '(yok)'})")
                             else:
                                 selected_target_id = target_id
+                                dwell_target_id = target_id
                                 raw_freq = tracker.known[target_id]["freq_mhz"]
                                 dwell_center_mhz = round(raw_freq / DWELL_SNAP_MHZ) * DWELL_SNAP_MHZ
                                 dwelling = True
@@ -727,10 +730,15 @@ def main():
 
                     if scan_idx >= len(scan_freqs):
                         # Bir tam tur bitti -- operatör bir hedef SEÇTİYSE onun
-                        # üzerine, seçmediyse en son bulunan hedefin üzerine kilitlen.
+                        # üzerine, seçmediyse en güçlü hedefin üzerine kilitlen.
+                        # current_id=dwell_target_id ile histerezis uygulanır --
+                        # birden fazla güçlü hedef varken (ör. yarışma alanında
+                        # başka takımların yayınları) küçük güç farklarıyla her
+                        # turda hedef değiştirip gereksiz retune yapılmasın diye.
                         scan_idx = 0
-                        lock_target = pick_target(tracker, selected_target_id)
+                        lock_target = pick_target(tracker, selected_target_id, dwell_target_id)
                         if lock_target is not None:
+                            dwell_target_id = lock_target
                             raw_freq = tracker.known[lock_target]["freq_mhz"]
                             dwell_center_mhz = round(raw_freq / DWELL_SNAP_MHZ) * DWELL_SNAP_MHZ
                             dwelling = True

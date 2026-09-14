@@ -34,6 +34,15 @@ CFAR_REFERENCE_CELLS = 8
 CFAR_PERCENTILE = 75.0
 CFAR_THRESHOLD_OFFSET_DB = 10.0  # eski sabit-eşik sürümüyle aynı varsayılan değer
 
+# pick_target() histerezisi: birden fazla güçlü hedef aynı anda varken (ör.
+# yarışma alanında başka takımların yayınları) "en güçlü" tur tur küçük gürültü
+# farklarıyla el değiştirebiliyor -- her el değiştirme ARAMA<->İZLEME arası
+# gerçek bir donanım retune'u (rtlsdr_set_sample_rate/PlutoRX örnekleme hızı
+# değişimi) demek, ve bunun ÇOK sık tekrarlanması RTL-SDR/libusb'de gerçek bir
+# segfault'a yol açtığı gözlemlendi (bkz. CLAUDE.md). Bu yüzden mevcut kilitli
+# hedeften yeni aday bu kadar dB daha güçlü değilse hedef DEĞİŞTİRİLMEZ.
+TARGET_LOCK_HYSTERESIS_DB = 3.0
+
 
 def compute_power_spectrum(samples, center_mhz, sample_rate, fft_size=FFT_SIZE, freq_bins=FREQ_BINS):
     """Ham I/Q örneklerinden (zaten center_mhz'e ayarlanmış SDR'dan okunmuş)
@@ -189,7 +198,7 @@ class TargetTracker:
         return "Aralıklı"
 
 
-def pick_target(tracker, selected_id):
+def pick_target(tracker, selected_id, current_id=None, hysteresis_db=TARGET_LOCK_HYSTERESIS_DB):
     """Operatör belirli bir hedef seçtiyse (ve o hedef hâlâ tracker'da
     biliniyorsa) onu döndürür; aksi halde EN GÜÇLÜ hedefe düşer -- "en son
     görülen" değil, çünkü zayıf/aralıklı gürültü kırıntıları da arada bir
@@ -197,13 +206,30 @@ def pick_target(tracker, selected_id):
     bir hedef 20sn'de 337 kez, gürültü kırıntıları sadece 3-5 kez tespit
     edilirken otomatik mod aralarında gidip geliyordu).
 
+    current_id: operatör seçimi YOKSA şu an kilitli olunan hedefin id'si
+    (çağıran taraf bir önceki pick_target() sonucunu geçirir). Yeni en güçlü
+    aday, current_id'den hysteresis_db kadar daha güçlü DEĞİLSE mevcut
+    hedefte kalınır -- birden fazla güçlü hedef güç bakımından birbirine
+    yakınken (ör. yarışma alanında başka takımların yayınları) her turda
+    farklı birine geçip gereksiz sık ARAMA<->İZLEME donanım retune'u
+    tetiklenmesin diye (bkz. TARGET_LOCK_HYSTERESIS_DB).
+
     streamer.py (RTL-SDR) ve pluto_ed_scanner.py (PlutoSDR) ile ORTAK
     kullanılan hedef seçim mantığı -- ikisi de aynı davranışı istediği için
     burada tek yerde: davranış değişirse iki dosyada ayrı ayrı değil,
     sadece burada değişir."""
     if selected_id is not None and selected_id in tracker.known:
         return selected_id
-    return tracker.most_powerful()
+
+    best_id = tracker.most_powerful()
+    if best_id is None:
+        return None
+    if current_id is not None and current_id in tracker.known and current_id != best_id:
+        current_power = tracker.known[current_id]["power_db"]
+        best_power = tracker.known[best_id]["power_db"]
+        if best_power - current_power < hysteresis_db:
+            return current_id
+    return best_id
 
 
 def build_scan_freqs(start_mhz, stop_mhz, step_mhz):
