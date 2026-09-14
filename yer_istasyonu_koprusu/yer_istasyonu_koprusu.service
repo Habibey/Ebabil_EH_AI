@@ -1,0 +1,47 @@
+# yer_istasyonu_koprusu.service — Jetson Nano üzerinde, 915 MHz telemetri
+# radyosu ile arayüz arasındaki ZeroMQ köprüsünü cihaz açılır açılmaz
+# otomatik başlatan systemd servisi. Sahada terminal açıp elle çalıştırma
+# ihtiyacını ortadan kaldırır (bkz. parametreCikarimi/ebabil_sdr/ebabil_sdr.service
+# ile aynı desen, RPi tarafındaki eşleniği).
+#
+# KURULUM (Jetson Nano üzerinde, bu dosya kopyalandıktan sonra):
+#   1. Aşağıdaki User=, WorkingDirectory=, ExecStart= yollarını ve
+#      Environment= satırlarındaki gerçek seri port / arayüz IP'sini
+#      GERÇEK değerlerle değiştir (örnekte "jetson" ve
+#      "/home/jetson/Ebabil_EH_AI/yer_istasyonu_koprusu" varsayıldı --
+#      bkz. Ebabil_EH_AI reposu, bu dosya artık orada vendor edildi).
+#   2. sudo cp yer_istasyonu_koprusu.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable yer_istasyonu_koprusu.service   (açılışta otomatik başlat)
+#   5. sudo systemctl start yer_istasyonu_koprusu.service    (şimdi hemen başlat)
+#
+# DURUM/LOG KONTROLÜ:
+#   systemctl status yer_istasyonu_koprusu.service
+#   journalctl -u yer_istasyonu_koprusu.service -f       (canlı log akışı)
+#
+# DURDURMA:
+#   sudo systemctl stop yer_istasyonu_koprusu.service
+
+[Unit]
+Description=EBABIL Yer İstasyonu Köprüsü (915MHz telemetri <-> ZeroMQ)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/home/jetson/Ebabil_EH_AI/yer_istasyonu_koprusu/build
+ExecStart=/home/jetson/Ebabil_EH_AI/yer_istasyonu_koprusu/build/yer_istasyonu_koprusu
+# EBABIL_TELEMETRI_PORT: 915MHz radyonun Jetson'a bağlı seri portu (örn.
+# /dev/ttyUSB0) -- gerçek yolu `dmesg | grep tty` ile doğrulayıp güncelle.
+# EBABIL_ARAYUZ_HOST: arayüzün (laptop) çalıştığı makinenin IP'si -- laptop
+# aynı yerel ağda sabit IP almıyorsa (DHCP) bu değeri güncel tutman gerekir.
+Environment=EBABIL_TELEMETRI_PORT=/dev/ttyUSB0
+Environment=EBABIL_TELEMETRI_BAUD=57600
+Environment=EBABIL_ARAYUZ_HOST=192.168.1.100
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -5,3 +5,4 @@
 __pycache__/
 *.pyc
 /konum_servisi/build/
+/yer_istasyonu_koprusu/build/
