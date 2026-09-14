@@ -26,8 +26,29 @@ aldatma). Frekanslar yarışmada ÖNCEDEN bilinmiyor, sistem kendisi bulmalı.
 - `src/predict.py` — TEKNOFEST modeli (`models/teknofest_model_v5_finetuned.keras`
   ya da TFLite fallback) ile modülasyon sınıflandırma. `models/`, `data/`
   klasörleri `.gitignore`'da -- GİT'TE YOK, manuel taşınması gerekiyor.
-- `src/streamer_watchdog.py` — streamer.py donarsa (RTL-SDR/libusb
-  kararsızlığı) otomatik yeniden başlatan gözcü.
+- `src/streamer_watchdog.py` — streamer.py donarsa/çökerse (RTL-SDR/libusb
+  segfault -- bkz. "Bilinen tuhaflıklar") otomatik yeniden başlatan gözcü.
+  GUI'den "GOZCU,YENIDEN_BASLAT" (port 5557) ile de anında tetiklenebilir.
+- `src/konum_istemcisi.py` — yön bulma/konum kestirimi (madde 5.1.4/5.1.5)
+  için `konum_servisi`'ne (C++, aşağıda) ZMQ REQ ile bağlanan istemci.
+  `streamer.py`/`pluto_ed_scanner.py` ORTAK kullanıyor.
+- `src/tespit_kaydedici.py` — her SYS güncellemesini zaman damgasıyla
+  `data/tespit_gunlugu/*.csv`'ye ekleyen sürekli loglama.
+- `src/sayisal_cozucu.py` — DİNLE sırasında sayısal (dijital) telsiz decode
+  (madde 5.1.3, opsiyonel) -- `multimon-ng`'yi alt süreç olarak kullanır,
+  kurulu değilse devre dışı kalır (kod etkilenmez).
+- `src/ai_servisi.py` — CRNN modelini (predict.py) ZMQ REQ/REP ile
+  Jetson'daki C++ köprüsüne (`yer_istasyonu_koprusu`) açan servis.
+- `src/seri_telemetri_koprusu.py` — İHA'daki (RPi) tarafta 915MHz radyonun
+  TEK sahibi: yerel ZMQ'daki (streamer.py/pluto_ed_scanner.py/mavlink_bridge.py)
+  satırları radyoya yazar, radyodan gelen komutları yerel 5557'den geri
+  yayınlar.
+- `konum_servisi/` (C++, vendor edildi) — Parçacık Filtresi + EKF matematiği,
+  `src/konum_istemcisi.py`'ye ZMQ REQ/REP (port 5570) ile açık.
+- `yer_istasyonu_koprusu/` (C++, vendor edildi) — Jetson'da çalışan, radyo
+  ile GUI'nin ZMQ portları (5555/5556/5559) arasındaki köprü. Format-agnostik
+  (satırları hiç yorumlamadan aktarır) -- RPi tarafının Python olması bunu
+  ETKİLEMEZ, C++'ta kalmaya devam ediyor.
 
 ## GUI AYRI BİR REPO'DA
 
@@ -89,46 +110,81 @@ Yapılanlar:
 - Windows'ta yaşanan RTL-SDR/libusb donma sorunu bu testte GÖRÜLMEDİ ama
   kısa süreli testti, uzun süreli kararlılık henüz kanıtlanmadı.
 
-## SIRADAKİ ADIMLAR (buradan devam)
+## KARAR (2026-09-14, yarışmaya 3 gün kala): Python KAZANDI, RPi'de C++ DEĞİL
 
-1. İkinci bir PlutoSDR edinilince `pluto_ed_scanner.py`'yi (2400-2483 MHz ED)
-   gerçek donanımla test et.
-2. Uzun süreli (saatler) çalıştırıp Ubuntu'da da RTL-SDR/libusb donması
-   yaşanıyor mu gözlemle -- `streamer_watchdog.py`'nin hâlâ gerekip
-   gerekmediğini bunun sonucuna göre değerlendir.
-3. Yarışma/saha koşullarında test (antenler arası mesafe, gerçek karışma
-   senaryoları).
-4. Sıradaki büyük hedef: Jetson Nano / Raspberry Pi'ye taşıma -- aşağıdaki
-   bölüme bak.
+Ekibin ayrı bir C++ reposu vardı (`ebabil-eh-backend`, GitHub'da
+`billgatoss/ebabil-eh-backend` -- İHA/RPi tarafında `parametreCikarimi/ebabil_sdr`
+adıyla streamer.py'nin C++ portu). Karşılaştırıldı, **Python'da devam
+kararı alındı**:
+- Python (bu repo) UÇTAN UCA test edilmişti (gerçek donanım), C++ tarafı
+  değildi.
+- RPi performans endişesi (C++'ın asıl gerekçesiydi) sanıldığı kadar güçlü
+  değil -- en ağır matematik (PF/EKF) zaten C++'ta (`konum_servisi`),
+  OS-CFAR/FFT zaten numpy (C hızında) vektörize.
+- RTL-SDR segfault riski (aşağıda) `librtlsdr`'da, Python'a özgü değil --
+  C++ tarafı da aynı riski taşırdı.
+- 3 günde en hızlı iterasyon Python'da.
 
-## GELECEK HEDEF: Jetson Nano ve Raspberry Pi (Ubuntu'dan sonra)
+**SONUÇ**: `ebabil_sdr` (C++, RPi portu) ve `arayuz` (GUI_QtCreator'ın eski
+çatalı) ARTIK KULLANILMIYOR/arşivde. Sadece `konum_servisi` (PF/EKF) ve
+`yer_istasyonu_koprusu` (radyo<->ZMQ köprüsü) -- ikisi de format-agnostik/
+donanımdan bağımsız C++ altyapı, RPi'nin dili değişse de aynı kalıyorlar --
+bu repoya vendor edildi (`konum_servisi/`, `yer_istasyonu_koprusu/`).
 
-Ubuntu laptop kurulumu bitince sıradaki hedef bunları **gömülü/headless
-sensör kutusu** olarak kurmak: KARAR VERİLDİ -- GUI bu kartlarda ÇALIŞMAYACAK,
-sadece backend (streamer.py/pluto_ed_scanner.py/et_control.py) orada çalışıp
-RF donanımına takılı kalacak; operatör GUI'yi kendi laptopunda
-(`EBABIL_JETSON_IP=<kartın IP'si>` ortam değişkeniyle, bkz. GUI_QtCreator
-CLAUDE.md) uzaktan izleyecek. Yani bu kartlara Qt6/CMake/GUI derleme İŞİ
-HİÇ YOK -- sadece Python + SDR sürücüleri.
+## GERÇEK MİMARİ: İHA (RPi) <-915MHz radyo-> Jetson <-Ethernet-> PC
 
-Farklılıklar/dikkat edilecekler:
-- **Jetson Nano (JetPack)**: genelde eski Ubuntu (18.04/20.04) + eski Python
-  (3.6 olabilir). `predict.py` zaten TensorFlow yoksa `tflite_runtime`'a
-  düşüyor (`_HAS_TF`) -- Jetson'da NVIDIA'nın CUDA'lı TF wheel'ini kurmaya
-  UĞRAŞMA, doğrudan `pip install tflite_runtime` yeterli, `models/*.tflite`
-  zaten hazır. `sdr_common.py`'de numpy<1.20 için `sliding_window_view`
-  uyumluluk shim'i de zaten var (eski Python 3.6 ihtimaline karşı).
-- **Raspberry Pi**: ARM mimarisi (Jetson'la ortak nokta) -- TensorFlow yine
-  muhtemelen çalışmaz/gereksiz, aynı şekilde `tflite_runtime` kullan.
-- İkisinde de: RTL-SDR/Pluto için udev/`plugdev`,`dialout` grup izni Ubuntu'da
-  yaptığımızın aynısı gerekiyor. ARM için bazı pip paketleri (numpy/scipy)
-  önceden derlenmiş wheel bulamayabilir, `pip install`'ın kaynak koddan
-  derlemesi normalden uzun sürebilir (`python3-dev`, `build-essential`
-  kurulu olsun).
-- Backend'i başlatırken: `EBABIL_ZMQ_BIND_HOST=0.0.0.0` (kartta) +
-  `EBABIL_JETSON_IP=<kartın-IP'si>` (GUI'nin çalıştığı laptopta) -- ikisi
-  birlikte "backend uzakta, GUI ayrı makinede" senaryosunu aktif eder (kod
-  zaten buna göre yazılmıştı, hiç değişiklik gerekmez).
+```
+İHA üzerinde (Raspberry Pi 4/5):
+  RTL-SDR (144-148/430-440/863-870, RF anahtarlı) ─┐
+  PlutoSDR (2.4G/5.8G, tek anten) ──────────────────┼─> streamer.py + pluto_ed_scanner.py
+  Matek FC + Here3 GPS ──────────────────────────────> mavlink_bridge.py
+                                                            │ (yerel ZMQ: 5555/5556/5559/5560/5561)
+                                                            v
+                                              seri_telemetri_koprusu.py
+                                                            │ (915MHz seri radyo, TEK hat)
+                                                            v
+Yerde (Jetson Nano):                        yer_istasyonu_koprusu (C++)
+                                                            │ (ZMQ 5555/5556/5559, Ethernet)
+                                                            v
+PC/Laptop:                                          GUI_QtCreator
+
+ET (bağımsız, ayrı RPi + Pluto TX):
+  PC ──ZMQ 5557──> et_control.py ──> Pluto TX ──RF anahtarı──> 144-433/868-915/GNSS-1.5G Yagi+PA
+```
+
+`ai_servisi.py`, Jetson'da `yer_istasyonu_koprusu`'nun yanında AYRI bir
+Python süreci olarak çalışması PLANLANMIŞTI (REQ/REP, port 5580) -- ama
+streamer.py zaten `predict.py`'yi DOĞRUDAN (aynı süreçte, RPi'de) çağırıyor,
+bu yüzden **AI sonucu artık düz metin olarak diğer satırlarla (SYS/SPEC/DF)
+birlikte seri_telemetri_koprusu üzerinden geçiyor** -- `ai_servisi.py`/
+DATA96 ikili IQ protokolü şu an KULLANILMIYOR (kod hazır, gerekirse -- ör.
+RPi'de tflite gerçek zamanlı yetişmezse -- devreye alınabilir).
+
+**DOĞRULANDI (socat sanal seri port ile)**: seri_telemetri_koprusu.py <->
+yer_istasyonu_koprusu iki yönde de (SYS satırı İHA->yer, komut yer->İHA)
+test edildi. **DOĞRULANMADI**: gerçek 915MHz radyo ile, gerçek RPi donanımı
+ile, `ai_servisi.py`/Jetson AI hattı (kullanılmıyor demiştik ama RPi'de
+tflite hızı hiç ölçülmedi).
+
+## SIRADAKİ ADIMLAR (buradan devam, donanım takılınca)
+
+1. RTL-SDR/Pluto/Matek takılınca `streamer.py` + `mavlink_bridge.py` +
+   `seri_telemetri_koprusu.py` (gerçek /dev/ttyUSB0 ile) uçtan uca test et.
+2. `multimon-ng` kur (`sudo apt install multimon-ng`) ve `sayisal_cozucu.py`'yi
+   gerçek bir APRS/AFSK1200 sinyaliyle doğrula -- HENÜZ HİÇ TEST EDİLMEDİ.
+3. GUI'de GNSS ALDATMAYI BAŞLAT düğmesinin gerçekten `et_control.py`'ye
+   komut gönderdiğini tıklayarak teyit et (kod/protokol doğrulandı, buton
+   tıklaması doğrulanmadı).
+4. RPi'de `tflite_runtime` ile gerçek zamanlı sınıflandırma hızını ölç --
+   yeterince hızlıysa mimari basit kalır (yukarıdaki gibi), yavaşsa
+   `ai_servisi.py`/DATA96 IQ pencereleme hattı devreye alınmalı.
+5. `EBABIL_RTL_RF_SWITCH_CHIP/HAT` ve `EBABIL_ET_RF_SWITCH_CHIP/HATLAR`
+   (gerçek GPIO pin numaraları) sahada donanımdan doğrulanıp ayarlanmalı --
+   şu an YAPILANDIRILMAMIŞ, anten sabit kalıyor.
+6. İkinci bir PlutoSDR edinilince `pluto_ed_scanner.py`'yi (2400-2483/5725-5875
+   MHz ED) gerçek donanımla test et.
+7. Yarışma/saha koşullarında test (antenler arası mesafe, gerçek karışma
+   senaryoları, gerçek 915MHz menzil).
 
 ## YÖN BULMA + KONUM KESTİRİMİ eklendi (2026-09-14)
 
