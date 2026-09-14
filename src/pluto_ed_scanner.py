@@ -74,6 +74,7 @@ import base64
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 from tespit_kaydedici import TespitKaydedici
 from sayisal_cozucu import SayisalCozucu
+from ses_kodlayici import SesKodlayici
 
 DRY_RUN = os.environ.get("EBABIL_PLUTO_ED_DRY_RUN", "0") == "1"
 PLUTO_ED_IP = os.environ.get("EBABIL_PLUTO_ED_IP", "ip:192.168.3.1")
@@ -278,6 +279,7 @@ class DinlemeOturumu:
         # Sayısal (dijital) telsiz decode -- madde 5.1.3'ün opsiyonel kısmı
         # (bkz. sayisal_cozucu.py, streamer.py'deki AYNI entegrasyon).
         self.sayisal_cozucu = SayisalCozucu(giris_sample_rate=demod.AUDIO_SAMPLE_RATE)
+        self.ses_kodlayici = SesKodlayici(giris_sample_rate=demod.AUDIO_SAMPLE_RATE)
 
     def _audio_callback(self, outdata, frames, time_info, status):
         buf = self._leftover
@@ -327,6 +329,7 @@ class DinlemeOturumu:
         if self._audio_queue is not None:
             self._audio_queue.put(audio.astype(np.float32))
         self.sayisal_cozucu.besle(audio.astype(np.float32))
+        self.ses_kodlayici.besle(audio.astype(np.float32))
 
     def demodle(self, raw_samples, fs_in, modulasyon_turu):
         """Yeni yakalanan ham örnekleri, bir önceki parçanın kuyruğuyla
@@ -401,6 +404,9 @@ def handle_dinleme_capture(rx, dinleme, hedef_id, freq_mhz, pub):
     dinleme.isle(audio)
     for metin in dinleme.sayisal_cozucu.oku():
         pub.send_string(f"SAYISAL,{hedef_id},{metin}")
+    ses_b64 = dinleme.ses_kodlayici.al()
+    if ses_b64 is not None:
+        pub.send_string(f"SES,{hedef_id},{ses_b64}")
     elapsed = time.time() - t0
     if elapsed > DINLEME_BLOK_SURESI_S * 2.0:
         # Sadece GERÇEKTEN kötü durumlarda logla (rx_destroy_buffer() düzeltmesi

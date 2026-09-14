@@ -1,15 +1,15 @@
-# RPi (companion computer) üzerinde çalıştırmak için gerekli Python paketleri.
-# Kurulum: pip3 install -r requirements.txt --break-system-packages
+# İHA (RPi, companion computer) üzerinde çalıştırmak için gerekli Python
+# paketleri. Kurulum: pip3 install -r requirements.txt --break-system-packages
 # (RPi OS/Debian Bookworm PEP 668 nedeniyle --break-system-packages gerekiyor --
 # bu makine tek amaçlı olduğu için sorun değil.)
 #
 # Sistem paketleri (apt ile AYRICA kurulmalı, bunlar pip'ten gelmez):
-#   sudo apt install python3-libgpiod libiio-utils librtlsdr0 portaudio19-dev
+#   sudo apt install python3-libgpiod libiio-utils librtlsdr0 portaudio19-dev libcodec2-1.2
 #
-# tensorflow yerine daha hafif bir alternatif gerekirse (RPi'de kurulumu
-# yavaş/başarısız olursa) bkz. src/predict.py -- tflite_runtime + önceden
-# dönüştürülmüş .tflite model dosyasıyla da çalışır (bkz. o dosyadaki
-# _TFLiteModel notu), ama önce düz tensorflow'u dene.
+# tensorflow ARTIK GEREKMİYOR (2026-09-14 kararı, bkz. CLAUDE.md "AI Jetson'a
+# taşındı") -- streamer.py/pluto_ed_scanner.py sınıflandırmayı RPi'de
+# yapmıyor, sadece IQ penceresini radyoya gönderiyor. tensorflow/tflite_runtime
+# sadece AI'nın ÇALIŞTIĞI makinede (Jetson/PC, ai_servisi.py) gerekiyor.
 numpy
 scipy
 pyzmq
@@ -17,5 +17,5 @@ pymavlink
 pyserial
 pyrtlsdr
 pyadi-iio
-tensorflow
 sounddevice
+pycodec2

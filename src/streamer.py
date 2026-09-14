@@ -70,6 +70,7 @@ import demod
 from konum_istemcisi import KonumIstemcisi, UavKonumDinleyici, konum_guncelle_ve_gonder
 from tespit_kaydedici import TespitKaydedici
 from sayisal_cozucu import SayisalCozucu
+from ses_kodlayici import SesKodlayici
 
 # --- Tarama ayarları ---
 SEARCH_SAMPLE_RATE = 250000  # arama modu -- ince çözünürlük (RTL-SDR'ın düşük geçerli aralığı: 225k-300k)
@@ -363,6 +364,10 @@ class DinlemeOturumu:
         # (bkz. sayisal_cozucu.py). Oturum boyunca TEK multimon-ng alt süreci
         # -- her baslat()'ta yeniden başlatmıyoruz, gereksiz.
         self.sayisal_cozucu = SayisalCozucu(giris_sample_rate=demod.AUDIO_SAMPLE_RATE)
+        # DİNLE sesini Codec2 ile sıkıştırıp radyo hattına hazırlar (bkz.
+        # ses_kodlayici.py) -- yere (operatörün GUI'sine) sesin KENDİSİNİ
+        # taşıyabilmek için, sadece metin telemetrisi değil.
+        self.ses_kodlayici = SesKodlayici(giris_sample_rate=demod.AUDIO_SAMPLE_RATE)
 
     def _audio_callback(self, outdata, frames, time_info, status):
         buf = self._leftover
@@ -412,6 +417,7 @@ class DinlemeOturumu:
         if self._audio_queue is not None:
             self._audio_queue.put(audio.astype(np.float32))
         self.sayisal_cozucu.besle(audio.astype(np.float32))
+        self.ses_kodlayici.besle(audio.astype(np.float32))
 
     def demodle(self, raw_samples, fs_in, modulasyon_turu):
         """Yeni yakalanan ham örnekleri, bir önceki parçanın kuyruğuyla
@@ -477,6 +483,13 @@ def handle_dinleme_capture(sdr, dinleme, hedef_id, freq_mhz, son_siniflandirma, 
     # notu, ayrı bir sabit alan sayısı beklenmiyor).
     for metin in dinleme.sayisal_cozucu.oku():
         pub.send_string(f"SAYISAL,{hedef_id},{metin}")
+
+    # DİNLE sesi (Codec2 ile sıkıştırılmış) -- "SES,<hedef_id>,<b64>" satırı
+    # diğerleri gibi opak metin, seri_telemetri_koprusu tarafından aynen
+    # radyoya aktarılır. GUI tarafında çözülüp çalınır (bkz. GUI_QtCreator).
+    ses_b64 = dinleme.ses_kodlayici.al()
+    if ses_b64 is not None:
+        pub.send_string(f"SES,{hedef_id},{ses_b64}")
 
     return sdr_common.compute_power_spectrum(samples[:FFT_SIZE], freq_mhz, SEARCH_SAMPLE_RATE)
 
