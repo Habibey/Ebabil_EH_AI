@@ -178,13 +178,86 @@ tflite hızı hiç ölçülmedi).
 4. RPi'de `tflite_runtime` ile gerçek zamanlı sınıflandırma hızını ölç --
    yeterince hızlıysa mimari basit kalır (yukarıdaki gibi), yavaşsa
    `ai_servisi.py`/DATA96 IQ pencereleme hattı devreye alınmalı.
-5. `EBABIL_RTL_RF_SWITCH_CHIP/HAT` ve `EBABIL_ET_RF_SWITCH_CHIP/HATLAR`
-   (gerçek GPIO pin numaraları) sahada donanımdan doğrulanıp ayarlanmalı --
-   şu an YAPILANDIRILMAMIŞ, anten sabit kalıyor.
+5. `EBABIL_RTL_RF_SWITCH_CHIP/HAT` -- RTL-SDR tarafının GPIO pin numarası
+   HENÜZ sahada doğrulanmadı, YAPILANDIRILMAMIŞ (anten sabit kalıyor). ET
+   tarafı (`EBABIL_ET_RF_SWITCH_CHIP/HATLAR`) 2026-09-15'te DOĞRULANDI, bkz.
+   "ET RF ANAHTARI (HMC241) doğrulandı" bölümü.
 6. İkinci bir PlutoSDR edinilince `pluto_ed_scanner.py`'yi (2400-2483/5725-5875
    MHz ED) gerçek donanımla test et.
 7. Yarışma/saha koşullarında test (antenler arası mesafe, gerçek karışma
    senaryoları, gerçek 915MHz menzil).
+
+## SAHA DONANIM TESTLERİ (2026-09-15)
+
+Üç makine (İHA RPi, ET RPi/"yasin@ebabil", Jetson/"admim-desktop") gerçek
+donanımla (RTL-SDR, 2x PlutoSDR, Matek+GPS, 915MHz radyo, HMC241 RF switch)
+ilk kez birlikte test edildi.
+
+- **İHA RPi'de pyrtlsdr/librtlsdr yaması GEREKTİ** (Ubuntu dev makinesindeki
+  aynı sorun -- bkz. yukarıdaki "pyrtlsdr / Ubuntu librtlsdr uyumsuzluğu"
+  notu, RPi OS'ta da AYNI mainline `librtlsdr0` (2.0.2) kurulu, RTL-SDR Blog
+  V4 kullanıyoruz). Yama BURADA DA venv/user-site içinde, GİT'E GİRMEDİ --
+  RPi'nin SD kartı değişirse/yeniden kurulursa tekrar uygulanmalı (rtlsdr_set_dithering
+  + 4 GPIO fonksiyonunu try/except ile sarmak, hem `librtlsdr.py`'deki sembol
+  bağlamada hem `rtlsdr.py`'nin `open()` içindeki çağrıda).
+- **İHA RPi + RTL-SDR ile `streamer.py` DOĞRULANDI** -- gerçek tarama, gerçek
+  hedef tespiti (GNU Radio'dan 433MHz test sinyaliyle).
+- **`mavlink_bridge.py` Matek ile DOĞRULANDI** -- Matek `uart0`'a (`/dev/serial0`
+  -> `/dev/ttyAMA0`, USB DEĞİL) bağlı, 115200 baud, `EBABIL_MAVLINK_PORT=/dev/serial0`.
+- **`konum_servisi` İHA RPi'de (ARM) DERLENDİ ve ÇALIŞTIRILDI** (`cmake .. && make`,
+  sadece `libzmq3-dev` gerekiyor) -- port 5570'te hazır. DF/konum kestirimi
+  ucundan uca (gerçek uçuşla) henüz test edilmedi, sadece servisin ayakta
+  olduğu doğrulandı.
+- **ET RPi + Pluto TX ile `et_control.py` DOĞRULANDI** -- SÜREKLİ/ARABAKIŞLI
+  karıştırma, GNSS Aldatma (tekli+çoklu servis) hepsi çalışıyor.
+- **Pluto TX "Device or resource busy" (EBUSY) hatası bulundu ve DÜZELTİLDİ**
+  (`et_control.py`, commit 9effbc3) -- `tx_destroy_buffer()`+`tx()` art arda
+  çağrıldığında Pluto'nun FPGA/DMA tarafı Python çağrısıyla tam senkron
+  serbest bırakmıyor, EBUSY ile patlıyordu. `_tx_write()` yardımcı metodu
+  (5 deneme, 0.2s bekleme) eklendi, thread'ler artık hata durumunda çökmeden
+  temiz sonlanıyor. **Süreç yeniden başlatmak YETMEDİ, Pluto'nun fiziksel
+  power-cycle'ı (USB çıkar-tak) gerekti** -- kernel/FPGA tarafındaki kilitli
+  DMA durumu process restart ile temizlenmiyor.
+- **ET RF ANAHTARI (HMC241) doğrulandı** -- gerçek donanım 3/4 ayrı röle
+  hattı DEĞİL, IC içine gömülü 2:4 kod çözücü (2 mantıksal pin: A, B).
+  `PlutoEtRfAnahtari` bu gerçek donanıma göre yeniden yazıldı (commit
+  3190cc8): `EBABIL_ET_RF_SWITCH_HATLAR` artık tam 2 hat (A,B) bekliyor,
+  port->A/B: `A=port&1, B=(port>>1)&1`. **ET RPi'nin gerçek pinleri: A=GPIO17
+  (fiziksel pin 11), B=GPIO27 (fiziksel pin 13), chip=`/dev/gpiochip0`.**
+  4 anten (RF1=144-433, RF2=868-915, RF3=GNSS-1.5G, RF4=2400-2483 ISM) gerçek
+  TX + RTL-SDR ile TEK TEK doğrulandı (`tools/dataset/test_pluto_tx_manual.py`
+  ile 433.5/900/1200/2450 MHz, 0dB tam güç) -- hepsi doğru antenden çıktı.
+- **libgpiod Python API SÜRÜM FARKI ÖNEMLİ**: ET RPi'de `gpiod` paketi v2
+  (2.2.0) kurulu çıktı -- v1'in `Chip.get_line()`/`Line.request()` API'si
+  yerine tamamen farklı `gpiod.request_lines(chip_yolu, config={...})`/
+  `gpiod.line.Direction`/`Value` API'si kullanıyor. `PlutoEtRfAnahtari` ve
+  `scripts/test_rf_switch.py` v2'ye göre yazıldı (commit 347563e) -- RTL RF
+  anahtarı (`streamer.py`'deki `RtlRfAnahtari`) test edilirken de AYNI sürüm
+  farkına dikkat edilmeli, hangi RPi'de hangi `gpiod` sürümü kurulu önceden
+  kontrol edilmeli (`python3 -c "import gpiod; print(gpiod.__version__)"`).
+  Ayrıca v2 chip yolu tam yol (`/dev/gpiochip0`) istiyor, bare isim
+  (`gpiochip0`) DEĞİL -- kodda otomatik `/dev/` öneki ekleniyor ama elle
+  test ederken (`gpioinfo` gibi) bu farka dikkat.
+- **`scripts/test_rf_switch.py` eklendi** (commit 47894d4/7dffeab) --
+  `et_control.py`'den bağımsız, interaktif 1-4 port seçip A/B GPIO'larını
+  elle test etmek için.
+- **Ağ/IP dersleri**: PC/Jetson/ET RPi farklı ağlardaysa (ör. biri WiFi
+  10.70.x.x, diğerleri 192.168.1.x) ZMQ hiç bağlanamıyor -- hepsi aynı
+  L2 segmentte olmalı. `.local` (mDNS/Avahi) isimleri güvenilmez olabiliyor
+  (client isolation vb.) -- IP ile bağlanmak daha sağlam. **Yarışma günü
+  planı**: PC/Jetson/ET RPi kendi özel (internetsiz) unmanaged Ethernet
+  switch'ine SABİT IP'lerle bağlanacak (PC=192.168.10.1... GÜNCEL:
+  `scripts/baslat_*.sh`'daki plan `192.168.50.1/2/3` -- PC/Jetson/ET RPi).
+  İHA RPi bu ağa HİÇ girmiyor (915MHz radyo üzerinden, IP değil).
+  Tek-komut başlatma scriptleri eklendi: `scripts/baslat_jetson_koprusu.sh`,
+  `scripts/baslat_et_rpi.sh` (bu repo), `baslat_gui.sh` (GUI_QtCreator
+  reposu) -- hepsi bu sabit IP'leri gömülü kullanıyor, env var yazmaya
+  gerek yok. Henüz gerçek bir switch ile UÇTAN UCA TEST EDİLMEDİ (switch
+  henüz temin edilmedi).
+- **`et_control.py`: 4. anten portu eklendi** (2400-2483 ISM, commit 1394962)
+  -- `ET_ANTEN_BANDLARI` artık 4 bant (144-433/868-915/GNSS-1.5G/2400-2483),
+  Pluto TX zaten 6GHz'e kadar çıkabildiği için (`PLUTO_TX_MAX_HZ`) ek bir
+  donanım kısıtı yok.
 
 ## YÖN BULMA + KONUM KESTİRİMİ eklendi (2026-09-14)
 
