@@ -15,14 +15,15 @@ et_control.py'nin ZATEN VAR OLAN komut dinleyicisi (sub_cmd) bunu otomatik
 alır -- YETER Kİ o süreçler EBABIL_GUI_HOST=127.0.0.1 ile başlatılsın (yani
 "GUI" olarak bu köprüye baksınlar). Hiçbir backend kodu DEĞİŞMEDİ.
 
-NEDEN AI için DATA96/ikili IQ paketleme YOK (ebabil_sdr/yer_istasyonu_koprusu
-ikilisinin aksine): streamer.py zaten predict.py'yi AYNI süreç içinde
-doğrudan çağırıyor (bkz. handle_classify_request) -- sınıflandırma RPi'de
-lokal olarak yapılıp sonucu ("AI,...") diğer satırlar gibi düz metin olarak
-buradan geçiyor. Ayrı bir ikili protokole/Jetson'a ait bir yapay zeka
-servisine gerek yok. TEK KOŞUL: RPi'de tflite_runtime'ın (TensorFlow yoksa)
-gerçek zamanlı sınıflandırma için yeterince hızlı olduğu doğrulanmalı --
-yavaş çıkarsa, ai_servisi.py + Jetson tabanlı alternatif hâlâ mevcut.
+AI SINIFLANDIRMASI ARTIK BURADA YAPILMIYOR (2026-09-14 kararı geri alındı,
+bkz. CLAUDE.md): streamer.py/pluto_ed_scanner.py predict.py'yi artık import
+ETMİYOR -- iki süreç AYNI ANDA TensorFlow/tflite'i RAM'e iki kere yüklemek
+RPi'de gereksiz ağırlıktı. Bunun yerine handle_classify_request sadece 128
+örneklik ham IQ penceresini "IQ,<id>,<b64>" metin satırı olarak (format
+burada da yorumlanmadan, diğer satırlar gibi) radyoya yazar; asıl
+sınıflandırma yer istasyonunda (Jetson/PC) yer_istasyonu_koprusu (C++) ile
+ai_servisi.py arasında ZMQ REQ/REP üzerinden yapılıp sonuç "AI,..." olarak
+GUI'ye oradan basılır.
 
 NEDEN FC'nin ham MAVLink çerçeveleri Mission Planner'a AKTARILMIYOR: kapsam
 bilinçli olarak daraltıldı. mavlink_bridge.py zaten FC'den okuyup temiz

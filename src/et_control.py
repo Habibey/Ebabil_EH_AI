@@ -52,6 +52,7 @@ Kullanım:
   python src/et_control.py
   EBABIL_ET_DRY_RUN=1 python src/et_control.py   # Pluto takılı değilken mantığı test et
 """
+import errno
 import os
 import struct
 import subprocess
@@ -407,6 +408,29 @@ class PlutoTX:
         if self.pluto is not None:
             self.pluto.tx_hardwaregain_chan0 = self.gain_db
 
+    def _tx_write(self, waveform_scaled, max_retries=5, retry_delay=0.2):
+        """tx_destroy_buffer()+tx() çiftini EBUSY'ye (-16) karşı dayanıklı hale
+        getirir. NEDEN GEREKLİ: Pluto'nun FPGA/DMA tarafında bir önceki TX
+        buffer'ının serbest bırakılması, Python'daki tx_destroy_buffer()
+        çağrısının dönüşüyle TAM senkron değil -- art arda hızlı
+        durdur/başlat (ör. bir görevden diğerine geçiş) buffer hâlâ meşgulken
+        yeni bir tane açmaya çalışıp OSError(EBUSY) ile patlayabiliyor
+        (sahada canlı donanımla doğrulandı). Başarılı/başarısız durumu bool
+        döner ki çağıran taraf (start()/_arabakisli_loop/_gnss_loop) hatada
+        thread'i çökertip temizliği atlamak yerine düzgün sonlanabilsin."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                self.pluto.tx_destroy_buffer()
+                self.pluto.tx(waveform_scaled)
+                return True
+            except OSError as e:
+                if e.errno == errno.EBUSY and attempt < max_retries:
+                    time.sleep(retry_delay)
+                    continue
+                print(f"[!] Pluto TX buffer açılamadı ({e}) -- {attempt}. deneme, vazgeçiliyor.")
+                return False
+        return False
+
     def start(self, gorev_kodu, freq_mhz, waveform):
         freq_hz = freq_mhz * 1e6
         if not (PLUTO_TX_MIN_HZ <= freq_hz <= PLUTO_TX_MAX_HZ):
@@ -420,8 +444,9 @@ class PlutoTX:
         if not DRY_RUN:
             self.pluto.tx_lo = int(freq_hz)
             self.pluto.tx_hardwaregain_chan0 = self.gain_db
-            self.pluto.tx_destroy_buffer()
-            self.pluto.tx(waveform_scaled)
+            if not self._tx_write(waveform_scaled):
+                print(f"[-] {gorev_kodu} başlatılamadı, TX buffer sürekli meşgul kaldı.")
+                return
         self.active_gorev = gorev_kodu
         self.active_freq_mhz = freq_mhz
 
@@ -499,8 +524,8 @@ class PlutoTX:
             if not DRY_RUN:
                 self.pluto.tx_lo = int(f_mhz * 1e6)
                 self.pluto.tx_hardwaregain_chan0 = self.gain_db
-                self.pluto.tx_destroy_buffer()
-                self.pluto.tx(waveform_scaled)
+                if not self._tx_write(waveform_scaled):
+                    break
             if stop_event.wait(dwell_s):
                 break
             idx += 1
@@ -550,8 +575,8 @@ class PlutoTX:
             if not DRY_RUN:
                 self.pluto.tx_lo = int(lo_mhz * 1e6)
                 self.pluto.tx_hardwaregain_chan0 = self.gain_db
-                self.pluto.tx_destroy_buffer()
-                self.pluto.tx(waveform_scaled)
+                if not self._tx_write(waveform_scaled):
+                    break
             if stop_event.wait(ARABAKISLI_TX_BURST_S):
                 break
 
