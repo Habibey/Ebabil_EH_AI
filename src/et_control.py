@@ -173,7 +173,9 @@ class PlutoEtRfAnahtari:
     tx_destroy_buffer()'dan SONRA, yeni tx()'ten ÖNCE çağrılır)."""
 
     def __init__(self):
-        self._lines = None  # [A hattı, B hattı] (gpiod Line)
+        self._req = None  # gpiod.LineRequest (v2 API)
+        self._a_no = None
+        self._b_no = None
         self._son_port = None
 
         chip_adi = os.environ.get("EBABIL_ET_RF_SWITCH_CHIP", "")
@@ -192,18 +194,28 @@ class PlutoEtRfAnahtari:
             return
 
         try:
-            import gpiod  # python3-libgpiod (apt)
-            chip = gpiod.Chip(chip_adi)
-            self._lines = []
-            for hat_no in hat_no_listesi:
-                line = chip.get_line(int(hat_no))
-                line.request(consumer="ebabil_et_rf_anahtari", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-                self._lines.append(line)
-            print(f"[ET RF ANAHTARI] Hazır (chip={chip_adi} A/B hatları={hat_no_listesi}).")
+            # libgpiod v2 Python API (gpiod>=1.6/2.x) -- v1'deki Chip.get_line()/
+            # Line.request() API'siyle TAMAMEN farklı, ikisi birbirine benzemiyor.
+            # Sahada test edilen RPi'de (Raspberry Pi OS güncel) v2 kurulu çıktı,
+            # bu yüzden burada v2 hedefleniyor. chip_adi hem bare isim ("gpiochip0")
+            # hem tam yol ("/dev/gpiochip0") olarak verilebilir, v2 tam yol istiyor.
+            import gpiod
+            from gpiod.line import Direction, Value
+            chip_yolu = chip_adi if chip_adi.startswith("/dev/") else f"/dev/{chip_adi}"
+            self._a_no, self._b_no = int(hat_no_listesi[0]), int(hat_no_listesi[1])
+            self._req = gpiod.request_lines(
+                chip_yolu,
+                consumer="ebabil_et_rf_anahtari",
+                config={
+                    self._a_no: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE),
+                    self._b_no: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE),
+                },
+            )
+            print(f"[ET RF ANAHTARI] Hazır (chip={chip_yolu} A=hat{self._a_no} B=hat{self._b_no}).")
         except Exception as e:
             print(f"[ET RF ANAHTARI] AÇILAMADI (chip={chip_adi} hatlar={hat_no_listesi}): {e} -- "
                   "GPIO donanımı yok/hazır değil ya da hat geçersiz, anten sabit kalacak.")
-            self._lines = None
+            self._req = None
 
     def porta_gec(self, freq_mhz):
         """freq_mhz'in ET_ANTEN_BANDLARI'ndaki hangi banda düştüğünü bulup o
@@ -211,7 +223,7 @@ class PlutoEtRfAnahtari:
         AYNI mantık, ama burada porttan A/B ikili koduna çevrilip HMC241'e
         gönderiliyor. Hiçbir banda denk gelmezse (PLUTO_TX aralığı dışı özel
         bir test frekansı vb.) mevcut pozisyon KORUNUR."""
-        if self._lines is None:
+        if self._req is None:
             return
         port = None
         for band in ET_ANTEN_BANDLARI:
@@ -221,9 +233,10 @@ class PlutoEtRfAnahtari:
         if port is None or port == self._son_port:
             return
         try:
-            a_hatti, b_hatti = self._lines
-            a_hatti.set_value(port & 1)
-            b_hatti.set_value((port >> 1) & 1)
+            from gpiod.line import Value
+            a_val = Value.ACTIVE if (port & 1) else Value.INACTIVE
+            b_val = Value.ACTIVE if ((port >> 1) & 1) else Value.INACTIVE
+            self._req.set_values({self._a_no: a_val, self._b_no: b_val})
             self._son_port = port
         except Exception as e:
             print(f"[ET RF ANAHTARI] port {port}'a geçiş başarısız: {e}")
