@@ -85,14 +85,26 @@ def os_cfar_detect(power_db, guard_cells=CFAR_GUARD_CELLS, reference_cells=CFAR_
     return detected, noise_floor, threshold
 
 
+DC_EXCLUDE_BINS = 1  # merkez bin'in her iki yanında da hariç tutulacak bin sayısı
+
 def detect_peak(binned_db, bin_freqs_mhz):
     """OS-CFAR ile tespit yapar, en güçlü tespit edilen hücreyi ve onu içeren
     bitişik tespit bölgesinin genişliğini döndürür: (frekans_mhz, güç_db,
     bant_genişliği_khz, gürültü_tabanı_db). Tespit yoksa None.
     Gürültü tabanı, CFAR'ın zaten hesapladığı ama eskiden dışarı hiç
     aktarılmayan değer -- SNR ve KTR Tablo 8'deki "Gürültü Tabanı" parametresi
-    için gerekli (bkz. streamer.py'deki SNR hesaplaması)."""
+    için gerekli (bkz. streamer.py'deki SNR hesaplaması).
+
+    Merkez bin (DC) HARİÇ TUTULUYOR -- RTL-SDR/zero-IF SDR'ların donanımsal
+    bir kusuru: ayarlandığı merkez frekansta LO sızıntısı/DC bileşeni gerçek
+    sinyal yokken bile görünür, anten hiç bağlı olmasa dahi OS-CFAR bunu
+    gerçek bir hedef sanabiliyor (sahada anten takılı olmayan bir bantta
+    "hedef" görülmesiyle keşfedildi, bkz. proje notları)."""
     detected, noise_floor, threshold = os_cfar_detect(binned_db)
+    dc_bin = len(binned_db) // 2
+    lo = max(0, dc_bin - DC_EXCLUDE_BINS)
+    hi = min(len(detected), dc_bin + DC_EXCLUDE_BINS + 1)
+    detected[lo:hi] = False
     if not detected.any():
         return None
 
