@@ -146,43 +146,49 @@ GNSS_VARSAYILAN_SERVIS = "GPS L1"
 
 
 class PlutoEtRfAnahtari:
-    """Pluto TX çıkışını 3 anten yolundan (144-433/868-915/1.5G GNSS Yagi+PA)
-    birine yönlendiren RF anahtarı -- streamer.py'deki RtlRfAnahtari ile AYNI
-    güvenli desen: gerçek GPIO chip/hat değerleri FABRİKE VERİLMEZ, açıkça
-    verilmezse anahtar YAPILANDIRILMAZ (anten sabit kalır, net uyarı basılır).
+    """Pluto TX çıkışını 4 anten yolundan (144-433/868-915/1.5G GNSS/2.4G ISM
+    Yagi+PA) birine yönlendiren RF anahtarı -- gerçek donanım Analog Devices
+    HMC241 (SP4T, DC-3.5GHz) -- bu IC'nin İÇİNDE 2:4 ikili kod çözücü var,
+    yani (streamer.py'deki RtlRfAnahtari'nin aksine) porta-özel ayrı röle
+    hatları YOK, sadece 2 mantıksal kontrol pini (A, B) var ve IC kendi
+    içinde hangi RF yolunu açacağına bu 2 bitten karar veriyor -- donanımın
+    kendisi böyle çalıştığı için burada başka bir seçenek yok.
 
-    3 port için TEK bir ikili GPIO hattı yetmez -- her porta AYRI bir çıkış
-    hattı (aynı anda sadece biri HIGH) kullanılıyor; bu, ikili kodlamaya göre
-    donanım hatası durumunda geçersiz/beklenmeyen bir porta düşme riskini
-    azaltır (her hat kendi rölesini/anahtar konumunu doğrudan sürüyor).
+    Doğruluk tablosu (HMC241 datasheet, port numaraları ET_ANTEN_BANDLARI ile
+    BİREBİR eşleşecek şekilde seçildi -- port N ikili karşılığı N'nin kendisi):
+        A=0 B=0 -> RF1 (port 0, 144-433)
+        A=1 B=0 -> RF2 (port 1, 868-915)
+        A=0 B=1 -> RF3 (port 2, GNSS-1.5G)
+        A=1 B=1 -> RF4 (port 3, 2400-2483)
+    yani A = port & 1, B = (port >> 1) & 1.
+
+    Gerçek GPIO chip/hat değerleri FABRİKE VERİLMEZ, açıkça verilmezse
+    anahtar YAPILANDIRILMAZ (anten sabit kalır, net uyarı basılır) --
+    streamer.py'deki RtlRfAnahtari ile AYNI güvenli desen.
 
     GÜVENLİK: Port değişmeden ÖNCE PA'nın/TX'in aktif güç vermediğinden emin
-    olunmalı (sıcak anahtarlama switch'i bozabilir) -- bu sınıf SADECE hangi
-    hattın HIGH olacağını seçer, TX enable/disable sırası çağıran tarafın
-    (PlutoTX) sorumluluğundadır (bkz. PlutoTX.start/stop -- porta_gec()
-    HER ZAMAN tx_destroy_buffer()'dan SONRA, yeni tx()'ten ÖNCE çağrılır)."""
+    olunmalı (sıcak anahtarlama switch'i bozabilir) -- bu sınıf SADECE A/B
+    pinlerini seçer, TX enable/disable sırası çağıran tarafın (PlutoTX)
+    sorumluluğundadır (bkz. PlutoTX.start/stop -- porta_gec() HER ZAMAN
+    tx_destroy_buffer()'dan SONRA, yeni tx()'ten ÖNCE çağrılır)."""
 
     def __init__(self):
-        self._lines = None  # port_index -> gpiod Line
+        self._lines = None  # [A hattı, B hattı] (gpiod Line)
         self._son_port = None
-
-        beklenen_hat_sayisi = len(ET_ANTEN_BANDLARI)
-        bant_adlari = "/".join(b["name"] for b in ET_ANTEN_BANDLARI)
 
         chip_adi = os.environ.get("EBABIL_ET_RF_SWITCH_CHIP", "")
         hatlar_metin = os.environ.get("EBABIL_ET_RF_SWITCH_HATLAR", "")
         if not chip_adi or not hatlar_metin:
-            print(f"[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- "
-                  f"anten sabit kalacak. Gerçek GPIO chip/hat numaralarını ({beklenen_hat_sayisi} tane, "
-                  f"virgülle ayrılmış, sırasıyla {bant_adlari} portlarına karşılık gelecek şekilde) "
-                  f"EBABIL_ET_RF_SWITCH_CHIP (ör. gpiochip0) ve EBABIL_ET_RF_SWITCH_HATLAR "
-                  f"(ör. 5,6,13,19) ile verin.")
+            print("[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- "
+                  "anten sabit kalacak. HMC241'in A/B kontrol pinlerinin bağlı olduğu GERÇEK GPIO "
+                  "hat numaralarını (2 tane, virgülle ayrılmış, sırasıyla A,B) EBABIL_ET_RF_SWITCH_CHIP "
+                  "(ör. gpiochip0) ve EBABIL_ET_RF_SWITCH_HATLAR (ör. 5,6) ile verin.")
             return
 
         hat_no_listesi = [h.strip() for h in hatlar_metin.split(",") if h.strip()]
-        if len(hat_no_listesi) != beklenen_hat_sayisi:
-            print(f"[ET RF ANAHTARI] AÇILAMADI: EBABIL_ET_RF_SWITCH_HATLAR tam {beklenen_hat_sayisi} hat "
-                  f"numarası içermeli ({bant_adlari}), {len(hat_no_listesi)} verildi -- anten sabit kalacak.")
+        if len(hat_no_listesi) != 2:
+            print(f"[ET RF ANAHTARI] AÇILAMADI: EBABIL_ET_RF_SWITCH_HATLAR tam 2 hat numarası "
+                  f"içermeli (HMC241'in A,B pinleri), {len(hat_no_listesi)} verildi -- anten sabit kalacak.")
             return
 
         try:
@@ -193,7 +199,7 @@ class PlutoEtRfAnahtari:
                 line = chip.get_line(int(hat_no))
                 line.request(consumer="ebabil_et_rf_anahtari", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
                 self._lines.append(line)
-            print(f"[ET RF ANAHTARI] Hazır (chip={chip_adi} hatlar={hat_no_listesi}).")
+            print(f"[ET RF ANAHTARI] Hazır (chip={chip_adi} A/B hatları={hat_no_listesi}).")
         except Exception as e:
             print(f"[ET RF ANAHTARI] AÇILAMADI (chip={chip_adi} hatlar={hat_no_listesi}): {e} -- "
                   "GPIO donanımı yok/hazır değil ya da hat geçersiz, anten sabit kalacak.")
@@ -202,7 +208,8 @@ class PlutoEtRfAnahtari:
     def porta_gec(self, freq_mhz):
         """freq_mhz'in ET_ANTEN_BANDLARI'ndaki hangi banda düştüğünü bulup o
         bandın portuna geçer -- streamer.py'deki RtlRfAnahtari.porta_gec ile
-        AYNI mantık. Hiçbir banda denk gelmezse (PLUTO_TX aralığı dışı özel
+        AYNI mantık, ama burada porttan A/B ikili koduna çevrilip HMC241'e
+        gönderiliyor. Hiçbir banda denk gelmezse (PLUTO_TX aralığı dışı özel
         bir test frekansı vb.) mevcut pozisyon KORUNUR."""
         if self._lines is None:
             return
@@ -214,8 +221,9 @@ class PlutoEtRfAnahtari:
         if port is None or port == self._son_port:
             return
         try:
-            for i, line in enumerate(self._lines):
-                line.set_value(1 if i == port else 0)
+            a_hatti, b_hatti = self._lines
+            a_hatti.set_value(port & 1)
+            b_hatti.set_value((port >> 1) & 1)
             self._son_port = port
         except Exception as e:
             print(f"[ET RF ANAHTARI] port {port}'a geçiş başarısız: {e}")
