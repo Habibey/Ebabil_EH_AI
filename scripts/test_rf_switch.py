@@ -53,10 +53,12 @@ def main():
                 print("Geçersiz, 1-4 arası bir sayı ya da q gir.")
                 continue
             port = int(secim) - 1  # 0-3'e çevir (ET_ANTEN_BANDLARI ile aynı)
-            a_val = Value.ACTIVE if (port & 1) else Value.INACTIVE
-            b_val = Value.ACTIVE if ((port >> 1) & 1) else Value.INACTIVE
-            req.set_values({a_no: a_val, b_no: b_val})
-            print(f"[*] {PORT_ISIMLERI[port + 1]} seçildi -- A={int(a_val)} B={int(b_val)}")
+            a_bit, b_bit = port & 1, (port >> 1) & 1
+            req.set_values({
+                a_no: Value.ACTIVE if a_bit else Value.INACTIVE,
+                b_no: Value.ACTIVE if b_bit else Value.INACTIVE,
+            })
+            print(f"[*] {PORT_ISIMLERI[port + 1]} seçildi -- A={a_bit} B={b_bit}")
     finally:
         req.set_values({a_no: Value.INACTIVE, b_no: Value.INACTIVE})
         req.release()
