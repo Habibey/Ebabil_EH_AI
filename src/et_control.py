@@ -111,14 +111,18 @@ PLUTO_TX_MAX_HZ = float(os.environ.get("EBABIL_PLUTO_TX_MAX_HZ", 6e9))
 
 # Pluto TX çıkışının hangi antene (RF switch üzerinden) yönlendirileceğini
 # frekansa göre seçen tablo -- streamer.py'deki RtlRfAnahtari/BANDS'in ET
-# tarafındaki eşdeğeri. 3 anten: 144-433 dual-bant Yagi, 868-915 dual-bant
+# tarafındaki eşdeğeri. 4 anten: 144-433 dual-bant Yagi, 868-915 dual-bant
 # Yagi, ~1.5GHz helisel (GNSS L1/L2/L5 + GLONASS/Galileo/BeiDou hepsi bu
-# aralıkta -- bkz. GNSS_BAND_HZ altta). Port numaraları GERÇEK kablolamaya
-# göre EBABIL_ET_RF_SWITCH_HATLAR ile eşlenir (bkz. PlutoEtRfAnahtari).
+# aralıkta -- bkz. GNSS_BAND_HZ altta), 2400-2483 ISM (pluto_ed_scanner.py'nin
+# ED tarafında taradığı aynı bant -- Pluto TX aralığı zaten 6GHz'e kadar
+# çıkıyor, EBABIL_PLUTO_TX_MAX_HZ, ek bir donanım kısıtı yok). Port numaraları
+# GERÇEK kablolamaya göre EBABIL_ET_RF_SWITCH_HATLAR ile eşlenir (bkz.
+# PlutoEtRfAnahtari).
 ET_ANTEN_BANDLARI = [
     {"name": "144-433", "start_mhz": 140.0, "stop_mhz": 440.0, "port": 0},
     {"name": "868-915", "start_mhz": 860.0, "stop_mhz": 920.0, "port": 1},
     {"name": "GNSS-1.5G", "start_mhz": 1150.0, "stop_mhz": 1615.0, "port": 2},
+    {"name": "2400-2483", "start_mhz": 2400.0, "stop_mhz": 2483.0, "port": 3},
 ]
 
 # GNSS Aldatma (madde 5.2.4) -- GERÇEK spoofing (sahte navigasyon mesajı/C-A
@@ -162,20 +166,23 @@ class PlutoEtRfAnahtari:
         self._lines = None  # port_index -> gpiod Line
         self._son_port = None
 
+        beklenen_hat_sayisi = len(ET_ANTEN_BANDLARI)
+        bant_adlari = "/".join(b["name"] for b in ET_ANTEN_BANDLARI)
+
         chip_adi = os.environ.get("EBABIL_ET_RF_SWITCH_CHIP", "")
         hatlar_metin = os.environ.get("EBABIL_ET_RF_SWITCH_HATLAR", "")
         if not chip_adi or not hatlar_metin:
-            print("[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- "
-                  "anten sabit kalacak. Gerçek GPIO chip/hat numaralarını (3 tane, virgülle ayrılmış, "
-                  "sırasıyla 144-433/868-915/GNSS-1.5G portlarına karşılık gelecek şekilde) "
-                  "EBABIL_ET_RF_SWITCH_CHIP (ör. gpiochip0) ve EBABIL_ET_RF_SWITCH_HATLAR "
-                  "(ör. 5,6,13) ile verin.")
+            print(f"[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- "
+                  f"anten sabit kalacak. Gerçek GPIO chip/hat numaralarını ({beklenen_hat_sayisi} tane, "
+                  f"virgülle ayrılmış, sırasıyla {bant_adlari} portlarına karşılık gelecek şekilde) "
+                  f"EBABIL_ET_RF_SWITCH_CHIP (ör. gpiochip0) ve EBABIL_ET_RF_SWITCH_HATLAR "
+                  f"(ör. 5,6,13,19) ile verin.")
             return
 
         hat_no_listesi = [h.strip() for h in hatlar_metin.split(",") if h.strip()]
-        if len(hat_no_listesi) != 3:
-            print(f"[ET RF ANAHTARI] AÇILAMADI: EBABIL_ET_RF_SWITCH_HATLAR tam 3 hat numarası "
-                  f"içermeli (144-433/868-915/GNSS-1.5G), {len(hat_no_listesi)} verildi -- anten sabit kalacak.")
+        if len(hat_no_listesi) != beklenen_hat_sayisi:
+            print(f"[ET RF ANAHTARI] AÇILAMADI: EBABIL_ET_RF_SWITCH_HATLAR tam {beklenen_hat_sayisi} hat "
+                  f"numarası içermeli ({bant_adlari}), {len(hat_no_listesi)} verildi -- anten sabit kalacak.")
             return
 
         try:
