@@ -42,6 +42,25 @@ export EBABIL_DF_REF_LON="${EBABIL_DF_REF_LON:-32.8369960}"
 
 KONUM_SERVISI_BIN="$_BURASI/konum_servisi/build/konum_servisi"
 
+# Bu gece defalarca yaşandı: script durdurulup hemen yeniden başlatılınca
+# (Ctrl+C'nin trap'i çalışmamış/eski bir süreç arka planda kalmış olabilir)
+# streamer.py/konum_servisi "Address already in use" ile sonsuz döngüye
+# giriyordu -- her seferinde elle ss+kill yapmak yerine, başlamadan önce bu
+# scriptin kullanacağı portları KENDİMİZ zorla temizliyoruz.
+port_temizle() {
+    local port="$1"
+    local pid
+    pid="$(sudo ss -ltnp 2>/dev/null | awk -v p=":$port\$" '$4 ~ p {print $0}' | grep -oP 'pid=\K[0-9]+' | head -1)"
+    if [ -n "$pid" ]; then
+        echo "[*] Port $port zaten kullanımda (PID $pid), temizleniyor..."
+        sudo kill -9 "$pid" 2>/dev/null || true
+        sleep 0.3
+    fi
+}
+for p in 5555 5556 5559 5570; do
+    port_temizle "$p"
+done
+
 PIDLER=()
 trap 'echo; echo "[*] Kapatiliyor..."; kill "${PIDLER[@]}" 2>/dev/null; wait 2>/dev/null' INT TERM EXIT
 

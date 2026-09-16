@@ -19,6 +19,24 @@
 set -e
 _BURASI="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Bu gece defalarca yaşandı: script durdurulup hemen yeniden başlatılınca
+# eski bir yer_istasyonu_koprusu/ai_servisi.py arka planda kalmış olabiliyor,
+# "Address already in use" ile başlamıyordu -- başlamadan önce kendimiz
+# zorla temizliyoruz.
+port_temizle() {
+    local port="$1"
+    local pid
+    pid="$(sudo ss -ltnp 2>/dev/null | awk -v p=":$port\$" '$4 ~ p {print $0}' | grep -oP 'pid=\K[0-9]+' | head -1)"
+    if [ -n "$pid" ]; then
+        echo "[*] Port $port zaten kullanımda (PID $pid), temizleniyor..."
+        sudo kill -9 "$pid" 2>/dev/null || true
+        sleep 0.3
+    fi
+}
+for p in 5555 5556 5559 5580; do
+    port_temizle "$p"
+done
+
 echo "[*] ai_servisi.py başlatılıyor (arka planda, port 5580)..."
 (cd "$_BURASI/src" && python3 ai_servisi.py) &
 AI_PID=$!
