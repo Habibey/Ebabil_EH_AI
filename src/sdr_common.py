@@ -101,7 +101,10 @@ DC_EXCLUDE_BINS = 1  # merkez bin'in her iki yanında da hariç tutulacak bin sa
 # NOT: bu aralık BU SPESİFİK RTL-SDR birimine özel olabilir -- donanım
 # değişirse (farklı bir RTL-SDR takılırsa) geçerliliğini yitirebilir, o
 # zaman yeniden (antensiz/gqrx ile çapraz doğrulanarak) belirlenmeli.
-KNOWN_BIRDIE_RANGES_MHZ = [(147.55, 147.95)]
+KNOWN_BIRDIE_RANGES_MHZ = [(147.5, 148.0)]
+# 2026-09-16 sabah saha testinde 147.955 MHz'de (önceki 147.55-147.95
+# sınırının hemen 5 kHz DIŞINDA, Bant Gen. tam 1 bin genişliği -- yine aynı
+# artefakt) tekrar görüldü, aralık 500kHz'e genişletildi.
 
 def detect_peak(binned_db, bin_freqs_mhz):
     """OS-CFAR ile tespit yapar, en güçlü tespit edilen hücreyi ve onu içeren
