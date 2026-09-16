@@ -87,6 +87,22 @@ def os_cfar_detect(power_db, guard_cells=CFAR_GUARD_CELLS, reference_cells=CFAR_
 
 DC_EXCLUDE_BINS = 1  # merkez bin'in her iki yanında da hariç tutulacak bin sayısı
 
+# Bilinen sabit "birdie" (donanım kaynaklı, gerçek sinyal OLMAYAN spur) --
+# gqrx ile aynı bantta gerçekten yayın OLMADIĞI doğrulanmış haldeyken bu RTL-SDR
+# biriminde tekrar tekrar 147.6-147.9 MHz civarında "hedef" görüldü (farklı
+# tarama adımlarında FARKLI merkeze göre farklı ofsetlerde çıktı -- yani
+# DC_EXCLUDE_BINS'in yakaladığı "merkezde LO sızıntısı" ile AYNI ŞEY DEĞİL,
+# hangi adımın penceresine denk gelirse o adımda görünen SABİT MUTLAK
+# frekanslı bir iç spur/birdie, muhtemelen RTL2832U/kristal harmoniği).
+# Bu yüzden bin-pozisyonuna göre değil, MUTLAK frekansa göre dar bir aralık
+# dışlanıyor -- pencere kenarlarını genel olarak dışlamak (denendi, geri
+# alındı) tarama adımları bitişik/örtüşmesiz olduğu için taranan bandın
+# ~%24'ünü kalıcı kör nokta yapıyordu, bu çok daha riskli bir taviz.
+# NOT: bu aralık BU SPESİFİK RTL-SDR birimine özel olabilir -- donanım
+# değişirse (farklı bir RTL-SDR takılırsa) geçerliliğini yitirebilir, o
+# zaman yeniden (antensiz/gqrx ile çapraz doğrulanarak) belirlenmeli.
+KNOWN_BIRDIE_RANGES_MHZ = [(147.55, 147.95)]
+
 def detect_peak(binned_db, bin_freqs_mhz):
     """OS-CFAR ile tespit yapar, en güçlü tespit edilen hücreyi ve onu içeren
     bitişik tespit bölgesinin genişliğini döndürür: (frekans_mhz, güç_db,
@@ -99,12 +115,16 @@ def detect_peak(binned_db, bin_freqs_mhz):
     bir kusuru: ayarlandığı merkez frekansta LO sızıntısı/DC bileşeni gerçek
     sinyal yokken bile görünür, anten hiç bağlı olmasa dahi OS-CFAR bunu
     gerçek bir hedef sanabiliyor (sahada anten takılı olmayan bir bantta
-    "hedef" görülmesiyle keşfedildi, bkz. proje notları)."""
+    "hedef" görülmesiyle keşfedildi, bkz. proje notları). Ayrıca bilinen sabit
+    birdie aralıkları (bkz. KNOWN_BIRDIE_RANGES_MHZ) MUTLAK frekansa göre
+    hariç tutuluyor."""
     detected, noise_floor, threshold = os_cfar_detect(binned_db)
     dc_bin = len(binned_db) // 2
     lo = max(0, dc_bin - DC_EXCLUDE_BINS)
     hi = min(len(detected), dc_bin + DC_EXCLUDE_BINS + 1)
     detected[lo:hi] = False
+    for birdie_lo, birdie_hi in KNOWN_BIRDIE_RANGES_MHZ:
+        detected &= ~((bin_freqs_mhz >= birdie_lo) & (bin_freqs_mhz <= birdie_hi))
     if not detected.any():
         return None
 
