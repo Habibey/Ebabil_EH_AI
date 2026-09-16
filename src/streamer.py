@@ -586,12 +586,16 @@ def main():
     scan_idx = 0
     # 915MHz radyo hattının bant genişliği kısıtlı (bkz. CLAUDE.md) -- hızlı
     # ARAMA modunda HER adımın SPEC'ini (64 sayı, ~450 bayt) yayınlamak
-    # gereksiz yük bindiriyor, çünkü operatör 84 adımlık taramanın her dilimini
-    # tam çözünürlükte görmek zorunda değil (tespit/takip zaten HER adımda
-    # aynen çalışıyor, sadece görsel waterfall güncelleme sıklığı düşüyor).
-    # İZLEME (dwell)/DİNLEME modlarında bu ATLAMA YOK -- operatör orada aktif
-    # tek bir frekansı izliyor, tam akıcılık önemli.
-    ARAMA_SPEC_ATLAMA = int(os.environ.get("EBABIL_ARAMA_SPEC_ATLAMA", "2"))
+    # gereksiz yük bindiriyordu, çünkü operatör 84 adımlık taramanın akıp
+    # giden dilimlerini zaten anlamlı okuyamıyor -- asıl değerli olan hedef
+    # listesi (SYS) zaten ayrı, küçük bir satırla gidiyor ve BURADAN
+    # ETKİLENMİYOR (tespit/takip HER adımda aynen çalışmaya devam ediyor).
+    # Varsayılan: ARAMA'da SPEC HİÇ YAYINLANMIYOR (0 = kapalı) -- waterfall
+    # sadece hedefe kilitlenince (İZLEME/dwell) ya da DİNLE'de canlanıyor,
+    # tam da operatörün onu gerçekten izlediği anlarda. İstenirse
+    # EBABIL_ARAMA_SPEC_ATLAMA=N (>=1) ile "her N adımda bir gönder" kısmi
+    # moduna dönülebilir.
+    ARAMA_SPEC_ATLAMA = int(os.environ.get("EBABIL_ARAMA_SPEC_ATLAMA", "0"))
     arama_spec_sayaci = 0
 
     dwelling = False
@@ -871,7 +875,7 @@ def main():
                     # SPEC'in radyoya YAYINLANMASI (görsel waterfall) atlanıyor,
                     # bir hedef asla bu yüzden kaçırılmaz.
                     arama_spec_sayaci += 1
-                    if ARAMA_SPEC_ATLAMA <= 1 or arama_spec_sayaci % ARAMA_SPEC_ATLAMA == 0:
+                    if ARAMA_SPEC_ATLAMA >= 1 and arama_spec_sayaci % ARAMA_SPEC_ATLAMA == 0:
                         spec_fields = ["SPEC", f"{center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
                         pub.send_string(",".join(spec_fields))
 
