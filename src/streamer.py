@@ -889,7 +889,18 @@ def main():
                         # buradayım" satırı, SPEC'in ~450 baytına kıyasla
                         # ihmal edilebilir yük.
                         if time.time() - son_arama_heartbeat > 1.0:
-                            pub.send_string("DURUM,TARIYOR")
+                            # "DURUM,TARIYOR" KULLANILMADI -- mainwindow.cpp'de
+                            # ÖNCEDEN TANIMLI, özel anlamı olan bir mesaj (DİNLE
+                            # modundan TEK SEFERLİK çıkış teyidi), her göründüğünde
+                            # olay günlüğüne "Tarama moduna dönüldü" yazıp DİNLE
+                            # butonunu senkronluyor -- saniyede bir gönderince GUI
+                            # günlüğünü spam'ledi (sahada görüldü). Bunun yerine
+                            # GUI'nin TANIMADIĞI (sessizce yok sayılan, bkz.
+                            # DURAKLATILDI'nin de aynı şekilde ele alınması) bir alt
+                            # tip kullanıyoruz -- watchdog/bağlantı-canlılık
+                            # kontrolü için paket varlığı yeterli, GUI'nin bunu
+                            # ANLAMASINA gerek yok.
+                            pub.send_string("DURUM,ARAMA_NABIZ")
                             son_arama_heartbeat = time.time()
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
