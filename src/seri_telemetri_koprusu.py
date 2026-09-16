@@ -128,13 +128,31 @@ def main():
     try:
         while True:
             olaylar = dict(poller.poll(timeout=20))
+            # 915MHz radyo (57600 baud) tarama modunun ürettiği SPEC hızını
+            # KALDIRAMIYOR -- satir_yaz() radyo meşgulken bloklanırken arka
+            # planda streamer.py yeni SPEC/SYS/UAV satırları üretmeye devam
+            # ediyor, bunlar ZMQ SUB kuyruğunda birikiyor. Her birikeni sırayla
+            # yazarsak GUI'nin gördüğü "an" giderek GERÇEK ZAMANDAN GERİ KALIR
+            # (dakikalarca eski veriyi oynatır, "147'de kilitli kalmış" gibi
+            # görünür) -- bu yüzden her poll turunda o an kuyrukta bekleyen
+            # HER ŞEYİ boşaltıp, aynı mesaj tipinden (satırın virgülden önceki
+            # kısmı: SPEC/SYS/UAV/DF/DURUM/...) sadece EN SONUNCUSUNU radyoya
+            # yazıyoruz -- GUI daha az sıklıkta ama HER ZAMAN GÜNCEL veri
+            # görsün diye. Tekil/nadir olaylar (ör. bir hedefin SYS satırı)
+            # zaten periyodik tekrarlandığı için (streamer.py her döngüde
+            # basıyor) kaybolmaz, sadece en güncel hali gider.
+            en_son = {}
             for sub in subs:
                 if sub not in olaylar:
                     continue
-                try:
-                    satir = sub.recv_string(flags=zmq.NOBLOCK)
-                except zmq.Again:
-                    continue
+                while True:
+                    try:
+                        satir = sub.recv_string(flags=zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    tip = satir.split(",", 1)[0]
+                    en_son[(sub, tip)] = satir
+            for satir in en_son.values():
                 seri.satir_yaz(satir)
                 satir_sayaci += 1
 
