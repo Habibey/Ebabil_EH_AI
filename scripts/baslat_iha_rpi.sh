@@ -17,8 +17,12 @@
 # Fiziksel port/adres varsayimlari -- KENDI DONANIMINA GORE DEGISTIR (asagidaki
 # export satirlarini duzenle, ya da calistirmadan once ortam degiskeni olarak
 # elle ver):
-#   EBABIL_MAVLINK_PORT   -- Matek'in bagli oldugu port (bu saha testinde
-#                            /dev/serial0 -- UART pinleri, USB DEGIL)
+#   EBABIL_MAVLINK_PORT   -- Ucus kontrolcusunun bagli oldugu port.
+#                            2026-09-16 donanim degisikligi: Matek (UART,
+#                            /dev/serial0) yerine Pixhawk (USB, genelde
+#                            /dev/ttyACM0) kullaniliyor -- calistirmadan once
+#                            `ls /dev/ttyACM*` ile gercek adi dogrula, RTL-SDR
+#                            de USB oldugu icin siralama degisebilir.
 #   EBABIL_TELEMETRI_PORT -- 915MHz radyonun bagli oldugu port (varsayilan
 #                            seri_telemetri_koprusu.py'de /dev/ttyUSB0)
 #   EBABIL_DF_REF_LAT/LON -- yarisma alaninin GERCEK referans noktasi.
@@ -34,7 +38,7 @@ set -e
 _BURASI="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$_BURASI"
 
-export EBABIL_MAVLINK_PORT="${EBABIL_MAVLINK_PORT:-/dev/serial0}"
+export EBABIL_MAVLINK_PORT="${EBABIL_MAVLINK_PORT:-/dev/ttyACM0}"  # Pixhawk (USB) -- degilse EBABIL_MAVLINK_PORT ile override et
 export EBABIL_TELEMETRI_PORT="${EBABIL_TELEMETRI_PORT:-/dev/ttyUSB0}"
 export EBABIL_GUI_HOST="127.0.0.1"  # streamer.py bu makinedeki seri_telemetri_koprusu'nu "GUI" sanacak
 export EBABIL_DF_REF_LAT="${EBABIL_DF_REF_LAT:-39.9250000}"

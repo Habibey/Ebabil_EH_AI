@@ -16,6 +16,15 @@
 # kalıyor (hata da vermiyor, best-effort). models/ klasörü .gitignore'da --
 # bu Jetson'da manuel taşınmış olmalı, yoksa ai_servisi.py model yüklerken
 # hata verip çıkar (aşağıdaki arka plan sürecinin logunu kontrol et).
+#
+# et_control.py DE BURADA başlatılıyor (2026-09-16 donanım degisikligi --
+# yerde ayrı bir ET RPi YOK artık, Pluto TX doğrudan Jetson'a USB ile
+# bağlı). ET RF anahtarının (HMC241) GPIO pinleri RPi'deki gibi
+# EBABIL_ET_RF_SWITCH_CHIP/HATLAR ile veriliyor -- ama Jetson'ın kendi GPIO
+# numaralandırması RPi'ninkiyle AYNI DEĞİL, pinler yeniden fiziksel olarak
+# doğrulanmalı (bkz. scripts/test_rf_switch.py, aynı yöntemle Jetson'da da
+# kullanılabilir). Vermezsen kod zaten "YAPILANDIRILMADI, anten sabit
+# kalacak" diyip zararsızca devam ediyor.
 set -e
 _BURASI="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -37,10 +46,17 @@ for p in 5555 5556 5559 5580; do
     port_temizle "$p"
 done
 
+pkill -9 -f "python3 et_control.py" 2>/dev/null || true
+
 echo "[*] ai_servisi.py başlatılıyor (arka planda, port 5580)..."
 (cd "$_BURASI/src" && python3 ai_servisi.py) &
 AI_PID=$!
-trap 'echo "[*] ai_servisi.py kapatılıyor..."; kill "$AI_PID" 2>/dev/null' INT TERM EXIT
+
+echo "[*] et_control.py başlatılıyor (arka planda, Pluto TX)..."
+(cd "$_BURASI/src" && EBABIL_GUI_HOST=192.168.50.1 python3 et_control.py) &
+ET_PID=$!
+
+trap 'echo "[*] ai_servisi.py/et_control.py kapatılıyor..."; kill "$AI_PID" "$ET_PID" 2>/dev/null' INT TERM EXIT
 sleep 1
 
 cd "$_BURASI/yer_istasyonu_koprusu/build"
