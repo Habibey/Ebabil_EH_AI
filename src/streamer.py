@@ -584,6 +584,15 @@ def main():
     varsayilan_scan_freqs = build_multi_band_scan_freqs()  # "bant varsayilan" ile buna geri dönülür
     scan_freqs = varsayilan_scan_freqs
     scan_idx = 0
+    # 915MHz radyo hattının bant genişliği kısıtlı (bkz. CLAUDE.md) -- hızlı
+    # ARAMA modunda HER adımın SPEC'ini (64 sayı, ~450 bayt) yayınlamak
+    # gereksiz yük bindiriyor, çünkü operatör 84 adımlık taramanın her dilimini
+    # tam çözünürlükte görmek zorunda değil (tespit/takip zaten HER adımda
+    # aynen çalışıyor, sadece görsel waterfall güncelleme sıklığı düşüyor).
+    # İZLEME (dwell)/DİNLEME modlarında bu ATLAMA YOK -- operatör orada aktif
+    # tek bir frekansı izliyor, tam akıcılık önemli.
+    ARAMA_SPEC_ATLAMA = int(os.environ.get("EBABIL_ARAMA_SPEC_ATLAMA", "2"))
+    arama_spec_sayaci = 0
 
     dwelling = False
     dwell_center_mhz = None
@@ -817,7 +826,7 @@ def main():
                         dinleme_freq_mhz = tracker.known[dinleme_hedef_id]["freq_mhz"]
                         binned_db, bin_freqs_mhz, fs_mhz = handle_dinleme_capture(
                             sdr, dinleme, dinleme_hedef_id, dinleme_freq_mhz, son_siniflandirma, pub)
-                        spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
+                        spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
                         pub.send_string(",".join(spec_fields))
 
                 elif tarama_duraklatildi:
@@ -838,7 +847,7 @@ def main():
                     # --- İZLEME (dwell): hedefe kilitli, geniş bant, sabit merkez ---
                     binned_db, bin_freqs_mhz, fs_mhz = capture_power_spectrum(sdr, dwell_center_mhz, DWELL_SAMPLE_RATE)
 
-                    spec_fields = ["SPEC", f"{dwell_center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
+                    spec_fields = ["SPEC", f"{dwell_center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
                     pub.send_string(",".join(spec_fields))
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
@@ -858,8 +867,13 @@ def main():
 
                     binned_db, bin_freqs_mhz, fs_mhz = capture_power_spectrum(sdr, center_mhz, SEARCH_SAMPLE_RATE)
 
-                    spec_fields = ["SPEC", f"{center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
-                    pub.send_string(",".join(spec_fields))
+                    # Tespit/takip HER adımda aynen çalışır (aşağıda) -- sadece
+                    # SPEC'in radyoya YAYINLANMASI (görsel waterfall) atlanıyor,
+                    # bir hedef asla bu yüzden kaçırılmaz.
+                    arama_spec_sayaci += 1
+                    if ARAMA_SPEC_ATLAMA <= 1 or arama_spec_sayaci % ARAMA_SPEC_ATLAMA == 0:
+                        spec_fields = ["SPEC", f"{center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
+                        pub.send_string(",".join(spec_fields))
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
                     if peak is not None:
