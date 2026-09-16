@@ -597,6 +597,7 @@ def main():
     # moduna dönülebilir.
     ARAMA_SPEC_ATLAMA = int(os.environ.get("EBABIL_ARAMA_SPEC_ATLAMA", "0"))
     arama_spec_sayaci = 0
+    son_arama_heartbeat = 0.0
 
     dwelling = False
     dwell_center_mhz = None
@@ -878,6 +879,18 @@ def main():
                     if ARAMA_SPEC_ATLAMA >= 1 and arama_spec_sayaci % ARAMA_SPEC_ATLAMA == 0:
                         spec_fields = ["SPEC", f"{center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
                         pub.send_string(",".join(spec_fields))
+                    else:
+                        # SPEC atlandığında port 5555 uzun süre tamamen sessiz
+                        # kalabiliyor (hedef bulunmadığı sürece SYS de gitmiyor)
+                        # -- bu, streamer_watchdog.py'nin "10sn veri yok, donmuş"
+                        # sanıp streamer.py'yi gereksiz yere öldürüp sonsuz
+                        # yeniden başlatma döngüsüne girmesine yol açıyordu
+                        # (bkz. saha testi, 2026-09-16 sabah). Ucuz bir "hâlâ
+                        # buradayım" satırı, SPEC'in ~450 baytına kıyasla
+                        # ihmal edilebilir yük.
+                        if time.time() - son_arama_heartbeat > 1.0:
+                            pub.send_string("DURUM,TARIYOR")
+                            son_arama_heartbeat = time.time()
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
                     if peak is not None:
