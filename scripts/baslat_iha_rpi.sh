@@ -21,9 +21,15 @@
 #                            /dev/serial0 -- UART pinleri, USB DEGIL)
 #   EBABIL_TELEMETRI_PORT -- 915MHz radyonun bagli oldugu port (varsayilan
 #                            seri_telemetri_koprusu.py'de /dev/ttyUSB0)
-#   EBABIL_DF_REF_LAT/LON -- yarisma alaninin GERCEK referans noktasi
-#                            (konum_servisi'nin varsayilani Ankara/ODTU
-#                            civari bir yer tutucu -- SAHADA GUNCELLE)
+#   EBABIL_DF_REF_LAT/LON -- yarisma alaninin GERCEK referans noktasi.
+#                            ELLE VERMENE GEREK YOK -- asagida mavlink_bridge
+#                            baslar baslamaz Iha'nin kendi GERCEK GPS fix'i
+#                            beklenip (df_referans_al.py) otomatik alinir.
+#                            Yarisma yeri onceden kesin bilinmiyor (bkz. proje
+#                            notlari) -- bu yuzden sabit bir deger yerine
+#                            sahada gercek GPS'ten okumak cok daha guvenilir.
+#                            GPS fix hic gelmezse (EBABIL_DF_REF_WAIT_S,
+#                            varsayilan 30sn) asagidaki yer tutucuya doner.
 set -e
 _BURASI="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$_BURASI"
@@ -45,6 +51,16 @@ PIDLER+=("$!")
 sleep 1
 
 if [ -x "$KONUM_SERVISI_BIN" ]; then
+    echo "[*] DF referansi icin gercek GPS fix'i bekleniyor (en fazla ${EBABIL_DF_REF_WAIT_S:-30}sn)..."
+    GERCEK_REF="$(python3 "$_BURASI/scripts/df_referans_al.py" 2>/dev/null || true)"
+    if [ -n "$GERCEK_REF" ]; then
+        export EBABIL_DF_REF_LAT="${GERCEK_REF%% *}"
+        export EBABIL_DF_REF_LON="${GERCEK_REF##* }"
+        echo "[*] DF referansi GERCEK GPS'ten alindi: $EBABIL_DF_REF_LAT, $EBABIL_DF_REF_LON"
+    else
+        echo "[!] GPS fix alinamadi (ic mekan/uydu yok?) -- YER TUTUCU referans kullanilacak: $EBABIL_DF_REF_LAT, $EBABIL_DF_REF_LON (YANLIS OLABILIR, DF sonuclari anlamsiz cikabilir)"
+    fi
+
     echo "[2/4] konum_servisi baslatiliyor (DF ref: $EBABIL_DF_REF_LAT,$EBABIL_DF_REF_LON)..."
     "$KONUM_SERVISI_BIN" &
     PIDLER+=("$!")
