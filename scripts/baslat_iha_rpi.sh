@@ -46,6 +46,26 @@ export EBABIL_DF_REF_LON="${EBABIL_DF_REF_LON:-32.8369960}"
 
 KONUM_SERVISI_BIN="$_BURASI/konum_servisi/build/konum_servisi"
 
+# Derlenmis binary, kaynak/CMakeLists degistikten sonra ELLE yeniden
+# derlenmezse SESSIZCE eski davranisla calismaya devam ediyordu (2026-09-18
+# konum_servisi'ye diskten-kalibrasyon-yukleme ve kal_durum alani eklendi --
+# rebuild edilmeyen bir RPi bunlarin HICBIRINE sahip olmaz, hata da vermez).
+# Kaynak dosyalardan herhangi biri binary'den daha yeniyse burada OTOMATIK
+# yeniden derliyoruz, "unuttum" ihtimalini ortadan kaldirmak icin.
+konum_servisi_derleme_bayat_mi() {
+    [ ! -x "$KONUM_SERVISI_BIN" ] && return 0
+    local kaynak_dizini="$_BURASI/konum_servisi"
+    local en_yeni_kaynak
+    en_yeni_kaynak="$(find "$kaynak_dizini" -not -path "*/build/*" \( -name "*.cpp" -o -name "*.hpp" -o -name "CMakeLists.txt" \) -newer "$KONUM_SERVISI_BIN" 2>/dev/null | head -1)"
+    [ -n "$en_yeni_kaynak" ]
+}
+
+if [ -d "$_BURASI/konum_servisi" ] && konum_servisi_derleme_bayat_mi; then
+    echo "[*] konum_servisi kaynak dosyaları binary'den daha yeni -- yeniden derleniyor..."
+    (cd "$_BURASI/konum_servisi" && mkdir -p build && cd build && cmake .. > /dev/null && make) \
+        || echo "[!] UYARI: konum_servisi yeniden derlenemedi -- eski binary (varsa) kullanılacak."
+fi
+
 # Bu gece defalarca yaşandı: script durdurulup hemen yeniden başlatılınca
 # (Ctrl+C'nin trap'i çalışmamış/eski bir süreç arka planda kalmış olabilir)
 # streamer.py/konum_servisi "Address already in use" ile sonsuz döngüye

@@ -105,9 +105,14 @@ class KonumIstemcisi:
         self._sock.connect(f"tcp://{self._host}:{self._port}")
 
     def guncelle(self, tid, band_hz, rssi_dbm, uav_lat, uav_lon, uav_irtifa_m):
-        """Basarili olursa (hedef_lat, hedef_lon, aci_deg, rms_derece)
-        dondurur; PF/EKF henuz gecerli bir konum uretmediyse ya da servis
-        yanit vermiyorsa None doner (cagiran taraf DF satiri GONDERMEMELI)."""
+        """Basarili olursa (hedef_lat, hedef_lon, aci_deg, rms_derece, kal_gercek)
+        dondurur -- kal_gercek: bu hedefin bandi icin GERCEK saha kalibrasyonu
+        mu (KAL_HESAPLA/diskten yuklendi) yoksa DEMO yer tutucu mu kullanildi
+        (2026-09-18 eklendi, main.cpp'nin GUNCELLE cevabindaki 6. alan --
+        bkz. konum_guncelle_ve_gonder: bu SESSIZCE gizlenmemeli, DF hattinin
+        yontem kodunda ayirt edilir). PF/EKF henuz gecerli bir konum
+        uretmediyse ya da servis yanit vermiyorsa None doner (cagiran taraf
+        DF satiri GONDERMEMELI)."""
         istek = f"GUNCELLE,{tid},{band_hz},{rssi_dbm},{uav_lat},{uav_lon},{uav_irtifa_m}"
         try:
             self._sock.send_string(istek)
@@ -120,10 +125,11 @@ class KonumIstemcisi:
             return None
 
         parcalar = cevap.split(",")
-        if parcalar[0] != "OK" or len(parcalar) != 5:
+        if parcalar[0] != "OK" or len(parcalar) != 6:
             return None
         try:
-            return float(parcalar[1]), float(parcalar[2]), float(parcalar[3]), float(parcalar[4])
+            kal_gercek = (parcalar[5] == "GERCEK")
+            return float(parcalar[1]), float(parcalar[2]), float(parcalar[3]), float(parcalar[4]), kal_gercek
         except ValueError:
             return None
 
@@ -151,5 +157,10 @@ def konum_guncelle_ve_gonder(pub, konum_istemcisi, uav_konum, tid, freq_mhz, pow
     sonuc = konum_istemcisi.guncelle(tid, band_hz, power_db, uav_lat, uav_lon, uav_irtifa)
     if sonuc is None:
         return
-    hedef_lat, hedef_lon, aci_deg, rms_derece = sonuc
-    pub.send_string(f"DF,{tid},IHA_MENZIL,{aci_deg:.2f},{rms_derece:.2f},{hedef_lat:.7f},{hedef_lon:.7f}")
+    hedef_lat, hedef_lon, aci_deg, rms_derece, kal_gercek = sonuc
+    # kal_gercek=False -- bu bant icin sahada henuz GERCEK kalibrasyon
+    # yapilmadi (konum_servisi demo P0/n yer tutucusuyla calisiyor), yontem
+    # kodu bunu ACIKCA belirtir (bkz. arayuz/mainwindow.cpp dfYontemMetni) --
+    # GUI'de sanki kalibre edilmis gibi SESSIZCE gosterilmemeli.
+    yontem_kodu = "IHA_MENZIL" if kal_gercek else "IHA_MENZIL_DEMO"
+    pub.send_string(f"DF,{tid},{yontem_kodu},{aci_deg:.2f},{rms_derece:.2f},{hedef_lat:.7f},{hedef_lon:.7f}")
