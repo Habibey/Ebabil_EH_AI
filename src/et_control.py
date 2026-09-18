@@ -345,12 +345,30 @@ def generate_multi_target_noise(freqs_mhz, lo_mhz, bw_hz_each=KARISTIRMA_BW_HZ, 
     return composite.astype(np.complex64)
 
 
+MAX_ALDATMA_SES_S = 120.0  # bir aldatma sesi bundan uzun olmamalı -- güvenlik sınırı
+
 def _load_wav_mono(path, target_fs):
+    """SAHADA BULUNDU (2026-09-18): ffmpeg/Lavf ile bir akışa yazılmış WAV
+    dosyaları (boyut önceden bilinmediği için) RIFF/data chunk boyutu alanına
+    0xFFFFFFFF ("bilinmiyor") yazabiliyor -- Python'un `wave` modülü bunu
+    ~1 milyar örnek (saatlerce ses) olarak yanlış yorumluyor,
+    `readframes(n_frames)` bu sahte sayıyla çağrılınca SÜREÇ SONSUZA KADAR
+    TIKANIYORDU (data/aldatma_sesleri/'deki gerçek bir dosyada tekrar
+    üretildi) -- tüm et_control.py komut döngüsünü (jamming/GNSS/TTS/DURDUR
+    dahil) durdurduğu için KRİTİK. Artık `n_frames`, dosyanın GERÇEK boyutuna
+    göre (WAV başlığının bildirdiği değere değil) güvenli bir üst sınıra
+    kırpılıyor -- hem bu hatayı hem benzer bozuk/akış WAV dosyalarını
+    genel olarak önlüyor. Ayrıca MAX_ALDATMA_SES_S ile mutlak bir üst sınır
+    var (gerçek ama aşırı uzun bir dosya da aynı riski taşımasın diye)."""
     with wave.open(path, "rb") as wf:
         n_channels = wf.getnchannels()
         sampwidth = wf.getsampwidth()
         src_fs = wf.getframerate()
         n_frames = wf.getnframes()
+        frame_boyutu = max(n_channels * sampwidth, 1)
+        dosya_boyutu = os.path.getsize(path)
+        guvenli_max_frame = max(dosya_boyutu // frame_boyutu, 1)
+        n_frames = min(n_frames, guvenli_max_frame, int(MAX_ALDATMA_SES_S * src_fs))
         raw = wf.readframes(n_frames)
     if sampwidth != 2:
         raise ValueError(f"Sadece 16-bit PCM WAV destekleniyor ({path} sampwidth={sampwidth})")
