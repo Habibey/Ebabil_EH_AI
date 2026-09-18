@@ -55,7 +55,7 @@ DEFAULT_BAUD = int(os.environ.get("EBABIL_TELEMETRI_BAUD", "57600"))
 # Bu RPi'deki yerel kaynaklar -- hepsi ZATEN çalışan bağımsız süreçler
 # (streamer.py, pluto_ed_scanner.py, mavlink_bridge.py), bu köprü sadece
 # dinleyip radyoya aktarır, hiçbirini yorumlamaz.
-KAYNAK_PORTLARI = [5555, 5556, 5559, 5560, 5561]
+KAYNAK_PORTLARI = [5555, 5556, 5559, 5560, 5561, 5562]  # 5562: kalibrasyon_servisi.py'nin KALSONUC yayını (2026-09-18)
 
 KOMUT_PUB_PORT = 5557
 

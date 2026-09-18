@@ -1,6 +1,6 @@
 #!/bin/bash
 # Iha RPi'deki TUM sureçleri tek komutla, dogru sirada baslatir:
-#   mavlink_bridge.py -> konum_servisi -> streamer_watchdog.py (->streamer.py)
+#   mavlink_bridge.py -> konum_servisi -> streamer_watchdog.py (->streamer.py) -> kalibrasyon_servisi.py
 #   -> seri_telemetri_koprusu.py
 #
 # NEDEN BU DORDU BIRLIKTE: konum_servisi ve streamer_watchdog.py'nin ikisi de
@@ -61,14 +61,14 @@ port_temizle() {
         sleep 0.3
     fi
 }
-for p in 5555 5556 5559 5570; do
+for p in 5555 5556 5559 5570 5562; do
     port_temizle "$p"
 done
 
 PIDLER=()
 trap 'echo; echo "[*] Kapatiliyor..."; kill "${PIDLER[@]}" 2>/dev/null; wait 2>/dev/null' INT TERM EXIT
 
-echo "[1/4] mavlink_bridge.py baslatiliyor (port=$EBABIL_MAVLINK_PORT)..."
+echo "[1/5] mavlink_bridge.py baslatiliyor (port=$EBABIL_MAVLINK_PORT)..."
 python3 src/mavlink_bridge.py &
 PIDLER+=("$!")
 sleep 1
@@ -84,21 +84,26 @@ if [ -x "$KONUM_SERVISI_BIN" ]; then
         echo "[!] GPS fix alinamadi (ic mekan/uydu yok?) -- YER TUTUCU referans kullanilacak: $EBABIL_DF_REF_LAT, $EBABIL_DF_REF_LON (YANLIS OLABILIR, DF sonuclari anlamsiz cikabilir)"
     fi
 
-    echo "[2/4] konum_servisi baslatiliyor (DF ref: $EBABIL_DF_REF_LAT,$EBABIL_DF_REF_LON)..."
+    echo "[2/5] konum_servisi baslatiliyor (DF ref: $EBABIL_DF_REF_LAT,$EBABIL_DF_REF_LON)..."
     "$KONUM_SERVISI_BIN" &
     PIDLER+=("$!")
     sleep 1
 else
-    echo "[2/4] UYARI: konum_servisi derlenmemis bulunamadi ($KONUM_SERVISI_BIN) -- Yon Bulma (DF) bu oturumda CALISMAYACAK."
+    echo "[2/5] UYARI: konum_servisi derlenmemis bulunamadi ($KONUM_SERVISI_BIN) -- Yon Bulma (DF) bu oturumda CALISMAYACAK."
     echo "       Derlemek icin: cd konum_servisi && mkdir -p build && cd build && cmake .. && make"
 fi
 
-echo "[3/4] streamer_watchdog.py baslatiliyor (RTL-SDR, gozculu)..."
+echo "[3/5] streamer_watchdog.py baslatiliyor (RTL-SDR, gozculu)..."
 python3 src/streamer_watchdog.py &
 PIDLER+=("$!")
 sleep 1
 
-echo "[4/4] seri_telemetri_koprusu.py baslatiliyor (radyo=$EBABIL_TELEMETRI_PORT)..."
+echo "[4/5] kalibrasyon_servisi.py baslatiliyor (GUI'den KAL_BASLAT/KAL_DURDUR)..."
+python3 src/kalibrasyon_servisi.py &
+PIDLER+=("$!")
+sleep 1
+
+echo "[5/5] seri_telemetri_koprusu.py baslatiliyor (radyo=$EBABIL_TELEMETRI_PORT)..."
 python3 src/seri_telemetri_koprusu.py --port "$EBABIL_TELEMETRI_PORT" &
 PIDLER+=("$!")
 

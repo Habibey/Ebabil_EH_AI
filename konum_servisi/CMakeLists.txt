@@ -26,3 +26,10 @@ add_executable(konum_servisi main.cpp ${YON_KONUM_SOURCES})
 target_include_directories(konum_servisi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(konum_servisi PkgConfig::ZMQ)
+
+# GCC < 9 std::filesystem'i ayri bir kutuphanede (libstdc++fs) tutuyordu -
+# diskten-kalibrasyon-yukleme (main.cpp) icin gerekli. Modern derleyicilerde
+# (RPi OS Bullseye/Bookworm gcc10+) bu bos/no-op, zararsiz.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
+    target_link_libraries(konum_servisi stdc++fs)
+endif()
