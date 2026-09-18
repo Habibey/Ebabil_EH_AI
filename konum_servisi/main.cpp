@@ -183,6 +183,47 @@ std::unordered_map<long long, RfKalibrasyonSonucu> kalibrasyonlariDisktenYukle(c
     return sonuc;
 }
 
+// DISKE KAYDETME (2026-09-18 eklendi, kalibrasyonlariDisktenYukle'nin ESI):
+// KAL_HESAPLA basariyla bittiginde sonucu ayni "_ozet.txt" formatinda
+// diske yazar -- bu olmadan hesaplanan kalibrasyon sadece o an calisan
+// surecin BELLEGINDE kalip, servis yeniden baslarsa (cokme/reboot)
+// KAYBOLUYORDU (diskten OKUMA ozelligi vardi ama onu BESLEYECEK bir
+// YAZMA adimi yoktu). Ayni dizine, ayni anahtar=deger formatina yazar ki
+// bir sonraki acilista kalibrasyonlariDisktenYukle bunu dogrudan okusun.
+void kalibrasyonuDiskeKaydet(const std::string& dizin, double band_hz, const RfKalibrasyonSonucu& kal) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(dizin, ec);
+    if (ec) {
+        std::cout << "[KONUM] UYARI: kalibrasyon dizini olusturulamadi (" << dizin << "): " << ec.message() << "\n";
+        return;
+    }
+
+    std::ostringstream ad;
+    ad << dizin << "/" << std::fixed << std::setprecision(3) << (band_hz / 1e6) << "mhz_ozet.txt";
+    const std::string yol = ad.str();
+
+    std::ofstream dosya(yol, std::ios::trunc);
+    if (!dosya) {
+        std::cout << "[KONUM] UYARI: kalibrasyon dosyasi yazilamadi (" << yol << ")\n";
+        return;
+    }
+
+    dosya << std::fixed << std::setprecision(6);
+    dosya << "# " << (band_hz / 1e6) << " MHz -- konum_servisi KAL_HESAPLA ile otomatik uretildi\n";
+    dosya << "band_hz=" << band_hz << "\n";
+    dosya << "P0_dbm=" << kal.P0_dbm << "\n";
+    dosya << "n=" << kal.n << "\n";
+    dosya << "sigma2_rssi=" << kal.sigma2_rssi << "\n";
+    dosya << "rssi_residual_std=" << kal.rssi_residual_std << "\n";
+    dosya << "sigma_mesafe_katsayisi=" << kal.sigma_mesafe_katsayisi << "\n";
+    dosya << "govde_ek_varyans_db2=" << kal.govde_ek_varyans_db2 << "\n";
+    dosya << "elektronik_taban_gurultu_dbm=" << kal.elektronik_taban_gurultu_dbm << "\n";
+    dosya.close();
+
+    std::cout << "[KONUM] Kalibrasyon diske kaydedildi: " << yol << "\n";
+}
+
 void yerelden_enlem_boylama(double x_dogu_m, double y_kuzey_m, double lat0_deg, double lon0_deg,
                              double& lat_out, double& lon_out) {
     lat_out = lat0_deg + (y_kuzey_m / DUNYA_YARICAP_M) * (180.0 / PI);
@@ -208,8 +249,9 @@ int main() {
     // gercek_kalibrasyonlar doluysa (KAL_HESAPLA basariyla calistiysa) yeni
     // hedefler artik demo yer tutucu yerine BUNU kullanir.
     std::unordered_map<long long, std::vector<KalibrasyonOrnegi>> kalibrasyon_ornekleri;
+    const std::string kal_cikti_dizini = ortamMetin("EBABIL_KAL_CIKTI_DIZINI", "kalibrasyon/rssi_mesafe_kalibrasyonu");
     std::unordered_map<long long, RfKalibrasyonSonucu> gercek_kalibrasyonlar =
-        kalibrasyonlariDisktenYukle(ortamMetin("EBABIL_KAL_CIKTI_DIZINI", "kalibrasyon/rssi_mesafe_kalibrasyonu"));
+        kalibrasyonlariDisktenYukle(kal_cikti_dizini);
 
     zmq::context_t ctx(1);
     zmq::socket_t rep(ctx, zmq::socket_type::rep);
@@ -342,6 +384,7 @@ int main() {
                         cevap = "HATA,gecersiz_regresyon";
                     } else {
                         gercek_kalibrasyonlar[anahtar] = hesap;
+                        kalibrasyonuDiskeKaydet(kal_cikti_dizini, band_hz, hesap);
                         std::ostringstream os;
                         os << "OK," << std::fixed << std::setprecision(2) << hesap.P0_dbm << ","
                            << std::setprecision(3) << hesap.n << "," << std::setprecision(2)
