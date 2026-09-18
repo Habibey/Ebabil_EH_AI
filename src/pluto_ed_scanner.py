@@ -392,9 +392,6 @@ def handle_classify_request(rx, pub_ai, tracker, selected_id):
     pub_ai.send_string(f"IQ,{tid},{b64}")
     print(f"[>] {tid} ({freq_mhz:.3f} MHz) için IQ penceresi yere gönderildi (sınıflandırma orada yapılacak).")
 
-    if son_siniflandirma is not None:
-        son_siniflandirma[tid] = (analog_sayisal, mod)
-
 
 def handle_dinleme_capture(rx, dinleme, hedef_id, freq_mhz, pub):
     t0 = time.time()
@@ -460,6 +457,21 @@ def main():
     dwell_started_at = 0.0
     dwell_locked = False
     selected_target_id = None
+
+    # streamer.py'deki ARAMA_SPEC_ATLAMA/DWELL_SPEC_ATLAMA ile AYNI sebep:
+    # bu süreç de AYNI 915MHz radyo hattını (seri_telemetri_koprusu üzerinden)
+    # streamer.py ile PAYLAŞIYOR -- SPEC'i hiç kısıtlamadan göndermek (ne
+    # ARAMA'da ne DWELL'de kısıtlama YOKTU) hattı tıkayıp SYS/SES paketlerinin
+    # bozulmasına yol açtı (2026-09-18 saha testi, bkz. streamer.py'deki not).
+    # NOT: streamer.py'nin aksine burada ARAMA modu için ayrı bir "hâlâ
+    # buradayım" nabız mesajı YOK -- ARAMA_SPEC_ATLAMA'yı streamer.py gibi
+    # "0" (tam sessiz) yapmıyoruz, GUI'nin bağlantı-canlılık kontrolü Pluto
+    # hattını "koptu" sanabilir. Bunun yerine kısıtlı ama sürekli (varsayılan
+    # her 5 adımda bir) trafik bırakıyoruz.
+    ARAMA_SPEC_ATLAMA = int(os.environ.get("EBABIL_PLUTO_ARAMA_SPEC_ATLAMA", "5"))
+    DWELL_SPEC_ATLAMA = int(os.environ.get("EBABIL_PLUTO_DWELL_SPEC_ATLAMA", "3"))
+    arama_spec_sayaci = 0
+    dwell_spec_sayaci = 0
 
     dinleme = DinlemeOturumu()
     dinleme_hedef_id = None
@@ -617,8 +629,10 @@ def main():
                         dinleme_freq_mhz = tracker.known[dinleme_hedef_id]["freq_mhz"]
                         binned_db, bin_freqs_mhz, fs_mhz = handle_dinleme_capture(
                             rx, dinleme, dinleme_hedef_id, dinleme_freq_mhz, pub)
-                        spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
-                        pub.send_string(",".join(spec_fields))
+                        dwell_spec_sayaci += 1
+                        if DWELL_SPEC_ATLAMA >= 1 and dwell_spec_sayaci % DWELL_SPEC_ATLAMA == 0:
+                            spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
+                            pub.send_string(",".join(spec_fields))
 
                 elif tarama_duraklatildi:
                     # --- DURAKLATILDI: operatör "TARAMAYI DURDUR" dedi --
@@ -633,14 +647,19 @@ def main():
                 else:
                     if dwelling:
                         binned_db, bin_freqs_mhz, fs_mhz = rx.capture(dwell_center_mhz, DWELL_SAMPLE_RATE)
+                        dwell_spec_sayaci += 1
+                        spec_gonder = DWELL_SPEC_ATLAMA >= 1 and dwell_spec_sayaci % DWELL_SPEC_ATLAMA == 0
                     else:
                         center_mhz = scan_freqs[scan_idx]
                         scan_idx += 1
                         binned_db, bin_freqs_mhz, fs_mhz = rx.capture(center_mhz, SEARCH_SAMPLE_RATE)
+                        arama_spec_sayaci += 1
+                        spec_gonder = ARAMA_SPEC_ATLAMA >= 1 and arama_spec_sayaci % ARAMA_SPEC_ATLAMA == 0
 
-                    spec_center = dwell_center_mhz if dwelling else center_mhz
-                    spec_fields = ["SPEC", f"{spec_center:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
-                    pub.send_string(",".join(spec_fields))
+                    if spec_gonder:
+                        spec_center = dwell_center_mhz if dwelling else center_mhz
+                        spec_fields = ["SPEC", f"{spec_center:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.2f}" for v in binned_db]
+                        pub.send_string(",".join(spec_fields))
 
                     peak = sdr_common.detect_peak(binned_db, bin_freqs_mhz)
                     if peak is not None:
