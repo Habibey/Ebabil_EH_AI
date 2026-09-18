@@ -376,8 +376,14 @@ def handle_classify_request(rx, pub_ai, tracker, selected_id):
     burada sınıflandırma YAPILMIYOR -- 128 örneklik IQ penceresi base64 ile
     "IQ,<id>,<b64>" metin satırı olarak radyoya gönderiliyor,
     yer_istasyonu_koprusu bunu ai_servisi.py'ye sorup "AI,..." sonucunu
-    KENDİSİ yayınlıyor. classical_I/Q çapraz kontrolü KAPSAM DIŞI (bkz.
-    streamer.py'deki aynı gerekçe -- bant genişliği)."""
+    KENDİSİ yayınlıyor.
+
+    2026-09-18 EKLENDİ -- streamer.py'deki AYNI klasik (modelden bağımsız)
+    Analog/Sayısal çapraz kontrolü: zaten YAKALANMIŞ olan geniş `resampled`
+    penceresinin TAMAMI (sadece AI'ye giden ilk 128 örneği DEĞİL) yerel
+    olarak sdr_common.classical_analog_sayisal'a veriliyor, sonuç ayrı bir
+    "AI,<id>,<tur>,Belirsiz" satırıyla yayınlanıyor -- ekstra bir yakalamaya
+    GEREK YOK, veri zaten elimizdeydi."""
     tid = sdr_common.pick_target(tracker, selected_id)
     if tid is None:
         print("[!] Henüz tespit edilmiş hedef yok, sınıflandırma isteği atlandı.")
@@ -391,6 +397,14 @@ def handle_classify_request(rx, pub_ai, tracker, selected_id):
     b64 = base64.b64encode(window.astype(np.complex64).tobytes()).decode("ascii")
     pub_ai.send_string(f"IQ,{tid},{b64}")
     print(f"[>] {tid} ({freq_mhz:.3f} MHz) için IQ penceresi yere gönderildi (sınıflandırma orada yapılacak).")
+
+    try:
+        klasik_tur, periyodiklik = sdr_common.classical_analog_sayisal(
+            resampled.real, resampled.imag)
+        pub_ai.send_string(f"AI,{tid},{klasik_tur},Belirsiz")
+        print(f"[>] {tid} için klasik tahmin: {klasik_tur} (periyodiklik={periyodiklik:.3f})")
+    except Exception as e:
+        print(f"[!] Klasik Analog/Sayısal tahmini başarısız (devam ediliyor): {e}")
 
 
 def handle_dinleme_capture(rx, dinleme, hedef_id, freq_mhz, pub):

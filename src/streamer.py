@@ -296,7 +296,19 @@ def handle_classify_request(sdr, pub_ai, tracker, selected_id=None):
     NOT: son_siniflandirma artık burada GÜNCELLENMİYOR (sonuç RPi'ye geri
     dönmüyor) -- DİNLE modu artık EBABIL_DINLEME_MOD (DINLEME_MOD_ZORUNLU)
     ile operatörün elle seçtiği türe göre demodüle ediyor (bkz. handle_dinleme_capture),
-    pluto_ed_scanner.py'deki AYNI kabul edilmiş kısıtlama."""
+    pluto_ed_scanner.py'deki AYNI kabul edilmiş kısıtlama.
+
+    2026-09-18 EKLENDİ -- KLASİK (modelden bağımsız) Analog/Sayısal çapraz
+    kontrolü: AI'nin küçük (128 örnek) penceresi Jetson'a gitmeye devam
+    ediyor (DEĞİŞMEDİ), ama BURADA, YEREL olarak (radyo hattına hiç
+    çıkmadan) CLASSICAL_CHECK_WINDOW kadar daha geniş bir pencere de
+    yakalanıp sdr_common.classical_analog_sayisal ile bağımsız bir
+    Analog/Sayısal tahmini üretiliyor, "AI,<id>,<tur>,Belirsiz" olarak AYRI
+    bir satırla yayınlanıyor -- GUI bunu AI'nin kendi cevabıyla AYNI
+    şekilde işler (yer_istasyonu_koprusu tanımadığı satırları olduğu gibi
+    geçiriyor, bkz. main.cpp). Model her zaman "Belirsiz" derse bile
+    (düşük güven), en azından Analog/Sayısal için elde bir tahmin olsun
+    diye eklendi."""
     tid = pick_target(tracker, selected_id)
     if tid is None:
         print("[!] Henüz tespit edilmiş hedef yok, sınıflandırma isteği atlandı.")
@@ -304,10 +316,19 @@ def handle_classify_request(sdr, pub_ai, tracker, selected_id=None):
 
     freq_mhz = tracker.known[tid]["freq_mhz"]
     sdr.tune(freq_mhz, SEARCH_SAMPLE_RATE)
-    window = sdr.read_samples(CLASSIFY_WINDOW)
+    genis_pencere = sdr.read_samples(CLASSICAL_CHECK_WINDOW)
+    window = genis_pencere[:CLASSIFY_WINDOW]
     b64 = base64.b64encode(window.astype(np.complex64).tobytes()).decode("ascii")
     pub_ai.send_string(f"IQ,{tid},{b64}")
     print(f"[>] {tid} ({freq_mhz:.3f} MHz) için IQ penceresi yere gönderildi (sınıflandırma orada yapılacak).")
+
+    try:
+        klasik_tur, periyodiklik = sdr_common.classical_analog_sayisal(
+            genis_pencere.real, genis_pencere.imag)
+        pub_ai.send_string(f"AI,{tid},{klasik_tur},Belirsiz")
+        print(f"[>] {tid} için klasik tahmin: {klasik_tur} (periyodiklik={periyodiklik:.3f})")
+    except Exception as e:
+        print(f"[!] Klasik Analog/Sayısal tahmini başarısız (devam ediliyor): {e}")
 
 
 def build_scan_freqs(start_mhz, stop_mhz):
@@ -599,6 +620,17 @@ def main():
     arama_spec_sayaci = 0
     son_arama_heartbeat = 0.0
 
+    # İZLEME (dwell) ve DİNLE modlarında SPEC'i HER adımda (kısıtlamasız)
+    # gönderiyorduk -- kasıtlıydı ("operatör tam o an izliyor") ama sahada
+    # 915MHz radyo hattını (57600 baud) tıkayıp hem SYS hem SES (DİNLE sesi)
+    # paketlerinin bozulmasına/birleşmesine yol açtığı görüldü (2026-09-18
+    # saha testi -- GUI'de "Geçersiz SYS/SPEC paketi" akını, DİNLE sesi hiç
+    # gelmedi). ARAMA_SPEC_ATLAMA ile AYNI "N adımda bir gönder" deseni,
+    # ama varsayılan KAPALI değil (canlı waterfall isteniyor) -- 1/3 orana
+    # düşürülüyor, tam susturmuyor.
+    DWELL_SPEC_ATLAMA = int(os.environ.get("EBABIL_DWELL_SPEC_ATLAMA", "3"))
+    dwell_spec_sayaci = 0
+
     dwelling = False
     dwell_center_mhz = None
     dwell_target_id = None  # otomatik modda pick_target()'ın histerezisi için "şu an kilitli hedef"
@@ -831,8 +863,15 @@ def main():
                         dinleme_freq_mhz = tracker.known[dinleme_hedef_id]["freq_mhz"]
                         binned_db, bin_freqs_mhz, fs_mhz = handle_dinleme_capture(
                             sdr, dinleme, dinleme_hedef_id, dinleme_freq_mhz, son_siniflandirma, pub)
-                        spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
-                        pub.send_string(",".join(spec_fields))
+                        # SES (Codec2 ses) satırları AYNI radyo hattını paylaşıyor --
+                        # SPEC'i kısıtlamazsak ses paketleriyle yarışıp ikisi de
+                        # bozuluyor (bkz. DWELL_SPEC_ATLAMA notu yukarıda). Ses
+                        # KESİNTİSİZ gönderiliyor (handle_dinleme_capture içinde),
+                        # burada sadece görsel waterfall'ı kısıyoruz.
+                        dwell_spec_sayaci += 1
+                        if DWELL_SPEC_ATLAMA >= 1 and dwell_spec_sayaci % DWELL_SPEC_ATLAMA == 0:
+                            spec_fields = ["SPEC", f"{dinleme_freq_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
+                            pub.send_string(",".join(spec_fields))
 
                 elif tarama_duraklatildi:
                     # --- DURAKLATILDI: operatör "TARAMAYI DURDUR" dedi --
@@ -852,8 +891,14 @@ def main():
                     # --- İZLEME (dwell): hedefe kilitli, geniş bant, sabit merkez ---
                     binned_db, bin_freqs_mhz, fs_mhz = capture_power_spectrum(sdr, dwell_center_mhz, DWELL_SAMPLE_RATE)
 
-                    spec_fields = ["SPEC", f"{dwell_center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
-                    pub.send_string(",".join(spec_fields))
+                    # bkz. DWELL_SPEC_ATLAMA tanımı yukarıda -- sürekli/güçlü bir
+                    # hedef varken sistem çoğu zamanı burada geçiriyor, SPEC'i
+                    # kısıtlamazsak radyo hattı SYS ile birlikte tıkanıp
+                    # bozuluyor (2026-09-18 saha testi).
+                    dwell_spec_sayaci += 1
+                    if DWELL_SPEC_ATLAMA >= 1 and dwell_spec_sayaci % DWELL_SPEC_ATLAMA == 0:
+                        spec_fields = ["SPEC", f"{dwell_center_mhz:.3f}", f"{fs_mhz:.3f}"] + [f"{v:.1f}" for v in binned_db]
+                        pub.send_string(",".join(spec_fields))
 
                     peak = detect_peak(binned_db, bin_freqs_mhz)
                     if peak is not None:

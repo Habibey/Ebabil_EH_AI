@@ -108,7 +108,12 @@ def classify_iq(model, feature_mean, feature_std, I, Q):
 # bir davranış -- "bilmiyorum" diyemiyor, 11 sınıftan birini seçmek zorunda).
 # Bu eşik, öyle bir durumda arayüze yanıltıcı kesin bir sınıf adı basmak
 # yerine "Belirsiz" göstererek operatörü uyarır.
-CONFIDENCE_THRESHOLD = 50.0  # yüzde
+CONFIDENCE_THRESHOLD = 25.0  # yüzde -- 2026-09-18: 128 orneklik pencereyle
+# sahada model guveni hep %20-40 araliginda kaliyordu (11 sinifli bir
+# problemde rastgele sansin -- ~%9 -- uzerinde ama 50'ye hic ulasamiyordu),
+# sonuc HEP "Belirsiz" cikiyordu. Modulasyon turu zorunlu olmadigi icin (bkz.
+# proje notlari) daha dusuk bir esikle -- yanlis olsa bile -- bir tahmin
+# vermek, hic cevap vermemekten daha degerli kabul edildi.
 
 # Modelden TAMAMEN bağımsız, klasik bir çapraz kontrol: sayısal sinyaller
 # (PSK/QAM/FSK) simge hızında belirgin bir periyodiklik gösterir (her simge

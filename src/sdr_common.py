@@ -8,6 +8,30 @@ import time
 
 import numpy as np
 
+# predict.classical_analog_sayisal ile BİREBİR AYNI matematik -- KASITLI olarak
+# buraya kopyalandı, predict.py'yi import ETMEDİK çünkü o dosya (koşullu da
+# olsa) tensorflow import ediyor -- AI'nin Jetson'a taşınmasının asıl sebebi
+# TensorFlow'u RPi'nin sürecine hiç yüklememekti, predict.py'yi import etmek
+# bunu geri getirirdi. Modelden bağımsız, saf numpy -- hiçbir öğrenilmiş
+# parametre kullanmaz, sadece otokorelasyon/periyodiklik.
+CLASSICAL_PERIODICITY_THRESHOLD = 0.14
+
+
+def classical_analog_sayisal(I, Q):
+    """Ham I/Q'dan (mümkünse geniş bir pencere -- 128 örnek periyodiklik
+    ölçümü için kısa kalabilir) anlık frekansın otokorelasyonuna bakarak
+    periyodiklik skoru çıkarır, kaba bir Analog/Sayısal tahmini döndürür."""
+    phase = np.unwrap(np.arctan2(Q, I))
+    inst_freq = np.diff(phase, prepend=phase[:1])
+    f = inst_freq - np.mean(inst_freq)
+    ac = np.correlate(f, f, mode="full")
+    ac = ac[len(ac) // 2:]
+    ac = ac / (ac[0] + 1e-12)
+    search = ac[2:len(ac) // 2]
+    periodicity = float(np.max(search)) if len(search) else 0.0
+    tur = "Analog" if periodicity >= CLASSICAL_PERIODICITY_THRESHOLD else "Sayısal"
+    return tur, periodicity
+
 try:
     from numpy.lib.stride_tricks import sliding_window_view
 except ImportError:
