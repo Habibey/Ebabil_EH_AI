@@ -299,16 +299,21 @@ def handle_classify_request(sdr, pub_ai, tracker, selected_id=None):
     pluto_ed_scanner.py'deki AYNI kabul edilmiş kısıtlama.
 
     2026-09-18 EKLENDİ -- KLASİK (modelden bağımsız) Analog/Sayısal çapraz
-    kontrolü: AI'nin küçük (128 örnek) penceresi Jetson'a gitmeye devam
-    ediyor (DEĞİŞMEDİ), ama BURADA, YEREL olarak (radyo hattına hiç
-    çıkmadan) CLASSICAL_CHECK_WINDOW kadar daha geniş bir pencere de
-    yakalanıp sdr_common.classical_analog_sayisal ile bağımsız bir
+    kontrolü: sdr_common.classical_analog_sayisal ile bağımsız bir
     Analog/Sayısal tahmini üretiliyor, "AI,<id>,<tur>,Belirsiz" olarak AYRI
     bir satırla yayınlanıyor -- GUI bunu AI'nin kendi cevabıyla AYNI
     şekilde işler (yer_istasyonu_koprusu tanımadığı satırları olduğu gibi
-    geçiriyor, bkz. main.cpp). Model her zaman "Belirsiz" derse bile
-    (düşük güven), en azından Analog/Sayısal için elde bir tahmin olsun
-    diye eklendi."""
+    geçiriyor, bkz. main.cpp).
+
+    2026-09-18 DÜZELTİLDİ (SAHADA BULUNDU): İlk sürüm bunun için AYRICA
+    CLASSICAL_CHECK_WINDOW (5000 örnek = 10000 bayt) okuyordu -- bu, tam
+    DİNLE'nin tetikledi türden bir RTL-SDR libusb overflow/segfault'unu
+    (kod -11) her ~5 saniyede bir (GUI'nin artık sürekli çalışan AI
+    isteğiyle) tetikliyordu, sistem sürekli çökme/yeniden-başlama
+    döngüsüne giriyordu. Artık EKSTRA OKUMA YOK -- AI'ye giden AYNI küçük
+    (128 örnek) pencere klasik kontrol için de kullanılıyor, tespit
+    riskini artırmadan (periyodiklik tahmini biraz daha az güvenilir olur,
+    ama kararlılık önceliğimiz)."""
     tid = pick_target(tracker, selected_id)
     if tid is None:
         print("[!] Henüz tespit edilmiş hedef yok, sınıflandırma isteği atlandı.")
@@ -316,15 +321,14 @@ def handle_classify_request(sdr, pub_ai, tracker, selected_id=None):
 
     freq_mhz = tracker.known[tid]["freq_mhz"]
     sdr.tune(freq_mhz, SEARCH_SAMPLE_RATE)
-    genis_pencere = sdr.read_samples(CLASSICAL_CHECK_WINDOW)
-    window = genis_pencere[:CLASSIFY_WINDOW]
+    window = sdr.read_samples(CLASSIFY_WINDOW)
     b64 = base64.b64encode(window.astype(np.complex64).tobytes()).decode("ascii")
     pub_ai.send_string(f"IQ,{tid},{b64}")
     print(f"[>] {tid} ({freq_mhz:.3f} MHz) için IQ penceresi yere gönderildi (sınıflandırma orada yapılacak).")
 
     try:
         klasik_tur, periyodiklik = sdr_common.classical_analog_sayisal(
-            genis_pencere.real, genis_pencere.imag)
+            window.real, window.imag)
         pub_ai.send_string(f"AI,{tid},{klasik_tur},Belirsiz")
         print(f"[>] {tid} için klasik tahmin: {klasik_tur} (periyodiklik={periyodiklik:.3f})")
     except Exception as e:
