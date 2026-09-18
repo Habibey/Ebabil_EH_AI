@@ -202,7 +202,11 @@ int main() {
     const double bearing_std_deg = ortamOndalik("EBABIL_DF_BEARING_STD_DEG", 10.0);
     const std::string bind_adres = ortamMetin("EBABIL_KONUM_SERVISI_BIND", "tcp://127.0.0.1:5570");
 
-    std::unordered_map<std::string, std::unique_ptr<KonumOrkestrasyonu>> takip;
+    // ikinci alan: bu hedefin kalibrasyonu GERCEK saha verisinden mi (disk/
+    // KAL_HESAPLA) yoksa DEMO yer tutucudan mi geldi -- GUNCELLE cevabinda
+    // her seferinde bildiriliyor (bkz. asagidaki "kal_durum" alani) ki
+    // Python/GUI tarafi bunu SESSIZCE gercekmis gibi GOSTERMESIN.
+    std::unordered_map<std::string, std::pair<std::unique_ptr<KonumOrkestrasyonu>, bool>> takip;
 
     // Saha kalibrasyonu -- bkz. dosya basindaki KAL_EKLE/KAL_HESAPLA notu.
     // gercek_kalibrasyonlar doluysa (KAL_HESAPLA basariyla calistiysa) yeni
@@ -247,8 +251,10 @@ int main() {
                     // kadar gecerli bir yaklasik deger).
                     const auto kal_it = gercek_kalibrasyonlar.find(bandAnahtari(band_hz));
                     RfKalibrasyonSonucu kalibrasyon;
+                    bool kalibrasyon_gercek = false;
                     if (kal_it != gercek_kalibrasyonlar.end()) {
                         kalibrasyon = kal_it->second;
+                        kalibrasyon_gercek = true;
                     } else {
                         kalibrasyon.P0_dbm = -40.0;
                         kalibrasyon.n = 2.5;
@@ -259,7 +265,7 @@ int main() {
                     }
                     orks->kalibrasyon_kaydet(band_hz, kalibrasyon);
 
-                    it = takip.emplace(tid, std::move(orks)).first;
+                    it = takip.emplace(tid, std::make_pair(std::move(orks), kalibrasyon_gercek)).first;
                 }
 
                 double uav_x = 0.0, uav_y = 0.0;
@@ -278,7 +284,7 @@ int main() {
                 gozlemci.y = uav_y;
                 gozlemci.irtifa = uav_irtifa;
 
-                EkfTahminSonucu tahmin = it->second->yon_sonucuyla_guncelle(yonSonucu, gozlemci);
+                EkfTahminSonucu tahmin = it->second.first->yon_sonucuyla_guncelle(yonSonucu, gozlemci);
 
                 if (tahmin.valid) {
                     double hedef_lat = 0.0, hedef_lon = 0.0;
@@ -289,9 +295,15 @@ int main() {
                     const double aci_deg =
                         AciYardimci::aci_normalize_et(std::atan2(dx_dogu, dy_kuzey) * 180.0 / PI);
 
+                    // kal_durum: GUI/Python tarafinin demo yer tutucuyu
+                    // gercek kalibrasyonmus gibi SESSIZCE gostermemesi icin
+                    // -- bkz. konum_istemcisi.py'deki kullanim.
+                    const char* kal_durum = it->second.second ? "GERCEK" : "DEMO";
+
                     std::ostringstream os;
                     os << "OK," << std::fixed << std::setprecision(7) << hedef_lat << "," << hedef_lon
-                       << "," << std::setprecision(2) << aci_deg << "," << bearing_std_deg;
+                       << "," << std::setprecision(2) << aci_deg << "," << bearing_std_deg
+                       << "," << kal_durum;
                     cevap = os.str();
                 } else {
                     cevap = "BEKLIYOR";
