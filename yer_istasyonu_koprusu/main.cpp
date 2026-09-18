@@ -567,7 +567,7 @@ int main() {
                             std::memcpy(ornekler.data(), ham.data(), ham.size());
                             std::string analog_sayisal, mod, guven;
                             if (ai_istemcisi.siniflandir(ornekler, analog_sayisal, mod, guven)) {
-                                const std::string ai_satiri = "AI," + hedef_id + "," + analog_sayisal + "," + mod;
+                                const std::string ai_satiri = "AI," + hedef_id + "," + analog_sayisal + "," + mod + "," + guven;
                                 zmq::message_t ai_msg(ai_satiri.data(), ai_satiri.size());
                                 pub_ai.send(ai_msg, zmq::send_flags::dontwait);
                                 std::cout << "[KOPRU] " << ai_satiri << " (guven %" << guven << ")\n";

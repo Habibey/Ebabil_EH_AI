@@ -161,8 +161,12 @@ def classify_iq_gated(model, feature_mean, feature_std, I, Q, classical_I=None, 
     ÇELİŞİRSE sonuç yine "Belirsiz"e döner -- iki bağımsız yöntem aynı anda
     aynı yanlışı yapma ihtimali, tek başına modele güvenmekten düşüktür."""
     analog_sayisal, detected_mod, confidence = classify_iq(model, feature_mean, feature_std, I, Q)
-    if confidence < CONFIDENCE_THRESHOLD:
-        return "Belirsiz", "Belirsiz", confidence
+    # 2026-09-18 SAHADA: CONFIDENCE_THRESHOLD eşiği kaldırıldı -- model artık
+    # düşük güvenle de olsa HER ZAMAN kendi tahminini döndürüyor ("Belirsiz"
+    # yerine). Modülasyon türü zorunlu olmadığı için yanlış olsa bile bir
+    # tahmin vermek, hiç cevap vermemekten daha değerli kabul edildi. GUI,
+    # confidence değerine göre (bkz. AI satırındaki güven alanı) düşük
+    # güvenli tahminleri farklı renkte gösterip operatörü uyarıyor.
 
     if classical_I is not None and classical_Q is not None:
         classical_tur, _ = classical_analog_sayisal(classical_I, classical_Q)
