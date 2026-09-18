@@ -764,6 +764,7 @@ def main():
                             scan_idx = 0
                             dwelling = False
                             dwell_locked = False
+                            dwell_target_id = None
                             band_names = ", ".join(f"{b['name']} MHz" for b in BANDS)
                             print(f"[*] Tarama bandı varsayılana döndürüldü: {band_names} "
                                   f"({len(scan_freqs)} adım)")
@@ -779,8 +780,21 @@ def main():
                                     scan_idx = 0
                                     dwelling = False
                                     dwell_locked = False
+                                    dwell_target_id = None
+                                    # SAHADA BULUNDU (2026-09-18): pick_target/most_powerful()
+                                    # tracker.known'daki TÜM ZAMANLARIN hafızasına bakıyor,
+                                    # sadece o an TARANAN banda değil -- bant daraltılsa bile
+                                    # eski (artık bant dışı kalan) bir hedef hâlâ "en güçlü"
+                                    # ya da histerezisle "kilitli" sayılıp sistemi ona geri
+                                    # çekebiliyordu (ör. bant 430-470'e daraltılsa da 144
+                                    # MHz'deki eski kayıt kilitlenmeye devam ediyordu). Yeni
+                                    # aralığın DIŞINDA kalan hedefler artık siliniyor.
+                                    silinen = [tid for tid, info in tracker.known.items()
+                                               if not (new_start <= info["freq_mhz"] <= new_stop)]
+                                    for tid in silinen:
+                                        del tracker.known[tid]
                                     print(f"[*] Tarama aralığı güncellendi: {new_start}-{new_stop} MHz "
-                                          f"({len(scan_freqs)} adım)")
+                                          f"({len(scan_freqs)} adım) -- {len(silinen)} bant dışı hedef hafızası temizlendi.")
                             except ValueError:
                                 print(f"[!] Geçersiz sayı: {line!r}")
 

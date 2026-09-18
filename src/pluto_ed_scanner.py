@@ -586,8 +586,16 @@ def main():
                                     scan_idx = 0
                                     dwelling = False
                                     dwell_locked = False
+                                    dwell_target_id = None
+                                    # streamer.py'deki AYNI düzeltme (2026-09-18, sahada
+                                    # bulundu): bant daraltılsa da eski/bant-dışı hedef
+                                    # hafızası pick_target'ı geri çekebiliyordu.
+                                    silinen = [tid for tid, info in tracker.known.items()
+                                               if not (new_start <= info["freq_mhz"] <= new_stop)]
+                                    for tid in silinen:
+                                        del tracker.known[tid]
                                     print(f"[*] Tarama bandı güncellendi: {new_start}-{new_stop} MHz "
-                                          f"({len(scan_freqs)} adım)")
+                                          f"({len(scan_freqs)} adım) -- {len(silinen)} bant dışı hedef hafızası temizlendi.")
                             except ValueError:
                                 print(f"[!] Geçersiz sayı: {line!r}")
 
