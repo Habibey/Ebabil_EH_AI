@@ -1,3 +1,4 @@
 {
-    "python.defaultInterpreterPath": "C:\\Users\\habib\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+    "python.defaultInterpreterPath": "C:\\Users\\habib\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+    "cmake.sourceDirectory": "/home/bedirhan/Ebabil_EH_AI/konum_servisi"
 }

@@ -170,21 +170,41 @@ class PlutoEtRfAnahtari:
     olunmalı (sıcak anahtarlama switch'i bozabilir) -- bu sınıf SADECE A/B
     pinlerini seçer, TX enable/disable sırası çağıran tarafın (PlutoTX)
     sorumluluğundadır (bkz. PlutoTX.start/stop -- porta_gec() HER ZAMAN
-    tx_destroy_buffer()'dan SONRA, yeni tx()'ten ÖNCE çağrılır)."""
+    tx_destroy_buffer()'dan SONRA, yeni tx()'ten ÖNCE çağrılır).
+
+    İKİ FARKLI GPIO BACKEND'İ DESTEKLENİYOR:
+      1. EBABIL_ET_RF_SWITCH_BOARD_PINS (ör. "11,13") -- Jetson.GPIO ile BOARD
+         (fiziksel header pin) numaralandırması. Jetson'da 2026-09-17/18'de
+         GERÇEKTEN kullanılan/multimetreyle doğrulanan yöntem budur -- Jetson'ın
+         taşıyıcı kartı NVIDIA'nın resmi devkit'i OLMADIĞI için (Jetson.GPIO
+         bunu açıkça uyarıyor, "Carrier board is not from a Jetson Developer
+         Kit") ham gpiod chip/line numarasını tahmin etmeye çalışmak yerine,
+         doğrudan bilinen fiziksel pin numaraları (5V=pin2, GND=pin6, A=pin11,
+         B=pin13) Jetson.GPIO'ya verilip çıkış multimetreyle doğrulandı.
+         ÖNCELİKLİ backend budur, ayarlıysa CHIP/HATLAR'a hiç bakılmaz.
+      2. EBABIL_ET_RF_SWITCH_CHIP/HATLAR -- ham libgpiod v2 chip/line numarası
+         (eski ET RPi'de kullanılan yöntem, bkz. CLAUDE.md "ET RPi kaldırıldı"
+         notu). BOARD_PINS verilmemişse buna düşülür."""
 
     def __init__(self):
-        self._req = None  # gpiod.LineRequest (v2 API)
+        self._req = None  # gpiod.LineRequest (v2 API, EBABIL_ET_RF_SWITCH_CHIP/HATLAR)
+        self._jetson_gpio = None  # Jetson.GPIO modülü, EBABIL_ET_RF_SWITCH_BOARD_PINS
         self._a_no = None
         self._b_no = None
         self._son_port = None
 
+        board_pinler_metin = os.environ.get("EBABIL_ET_RF_SWITCH_BOARD_PINS", "")
+        if board_pinler_metin:
+            self._init_jetson_gpio_board(board_pinler_metin)
+            return
+
         chip_adi = os.environ.get("EBABIL_ET_RF_SWITCH_CHIP", "")
         hatlar_metin = os.environ.get("EBABIL_ET_RF_SWITCH_HATLAR", "")
         if not chip_adi or not hatlar_metin:
-            print("[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- "
-                  "anten sabit kalacak. HMC241'in A/B kontrol pinlerinin bağlı olduğu GERÇEK GPIO "
-                  "hat numaralarını (2 tane, virgülle ayrılmış, sırasıyla A,B) EBABIL_ET_RF_SWITCH_CHIP "
-                  "(ör. gpiochip0) ve EBABIL_ET_RF_SWITCH_HATLAR (ör. 5,6) ile verin.")
+            print("[ET RF ANAHTARI] YAPILANDIRILMADI (EBABIL_ET_RF_SWITCH_BOARD_PINS ya da "
+                  "EBABIL_ET_RF_SWITCH_CHIP/HATLAR verilmedi) -- anten sabit kalacak. Jetson'da "
+                  "HMC241'in A/B pinlerinin bağlı olduğu fiziksel header pin numaralarını (2 tane, "
+                  "virgülle ayrılmış, A,B) EBABIL_ET_RF_SWITCH_BOARD_PINS (ör. 11,13) ile verin.")
             return
 
         hat_no_listesi = [h.strip() for h in hatlar_metin.split(",") if h.strip()]
@@ -211,11 +231,34 @@ class PlutoEtRfAnahtari:
                     self._b_no: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE),
                 },
             )
-            print(f"[ET RF ANAHTARI] Hazır (chip={chip_yolu} A=hat{self._a_no} B=hat{self._b_no}).")
+            print(f"[ET RF ANAHTARI] Hazır (gpiod chip={chip_yolu} A=hat{self._a_no} B=hat{self._b_no}).")
         except Exception as e:
             print(f"[ET RF ANAHTARI] AÇILAMADI (chip={chip_adi} hatlar={hat_no_listesi}): {e} -- "
                   "GPIO donanımı yok/hazır değil ya da hat geçersiz, anten sabit kalacak.")
             self._req = None
+
+    def _init_jetson_gpio_board(self, board_pinler_metin):
+        """EBABIL_ET_RF_SWITCH_BOARD_PINS ile verilen 2 fiziksel header pinini
+        (A,B) Jetson.GPIO BOARD modunda OUTPUT olarak açar -- bkz. sınıf
+        docstring'indeki "İKİ FARKLI GPIO BACKEND'İ" notu."""
+        pin_no_listesi = [p.strip() for p in board_pinler_metin.split(",") if p.strip()]
+        if len(pin_no_listesi) != 2:
+            print(f"[ET RF ANAHTARI] AÇILAMADI: EBABIL_ET_RF_SWITCH_BOARD_PINS tam 2 pin "
+                  f"numarası içermeli (HMC241'in A,B pinleri), {len(pin_no_listesi)} verildi -- "
+                  "anten sabit kalacak.")
+            return
+        try:
+            import Jetson.GPIO as GPIO
+            self._a_no, self._b_no = int(pin_no_listesi[0]), int(pin_no_listesi[1])
+            GPIO.setmode(GPIO.BOARD)
+            GPIO.setup(self._a_no, GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(self._b_no, GPIO.OUT, initial=GPIO.LOW)
+            self._jetson_gpio = GPIO
+            print(f"[ET RF ANAHTARI] Hazır (Jetson.GPIO BOARD A=pin{self._a_no} B=pin{self._b_no}).")
+        except Exception as e:
+            print(f"[ET RF ANAHTARI] AÇILAMADI (Jetson.GPIO BOARD pinler={pin_no_listesi}): {e} -- "
+                  "GPIO donanımı yok/hazır değil ya da pin geçersiz, anten sabit kalacak.")
+            self._jetson_gpio = None
 
     def porta_gec(self, freq_mhz):
         """freq_mhz'in ET_ANTEN_BANDLARI'ndaki hangi banda düştüğünü bulup o
@@ -223,7 +266,7 @@ class PlutoEtRfAnahtari:
         AYNI mantık, ama burada porttan A/B ikili koduna çevrilip HMC241'e
         gönderiliyor. Hiçbir banda denk gelmezse (PLUTO_TX aralığı dışı özel
         bir test frekansı vb.) mevcut pozisyon KORUNUR."""
-        if self._req is None:
+        if self._req is None and self._jetson_gpio is None:
             return
         port = None
         for band in ET_ANTEN_BANDLARI:
@@ -232,11 +275,18 @@ class PlutoEtRfAnahtari:
                 break
         if port is None or port == self._son_port:
             return
+        a_bit = 1 if (port & 1) else 0
+        b_bit = 1 if ((port >> 1) & 1) else 0
         try:
-            from gpiod.line import Value
-            a_val = Value.ACTIVE if (port & 1) else Value.INACTIVE
-            b_val = Value.ACTIVE if ((port >> 1) & 1) else Value.INACTIVE
-            self._req.set_values({self._a_no: a_val, self._b_no: b_val})
+            if self._jetson_gpio is not None:
+                GPIO = self._jetson_gpio
+                GPIO.output(self._a_no, GPIO.HIGH if a_bit else GPIO.LOW)
+                GPIO.output(self._b_no, GPIO.HIGH if b_bit else GPIO.LOW)
+            else:
+                from gpiod.line import Value
+                a_val = Value.ACTIVE if a_bit else Value.INACTIVE
+                b_val = Value.ACTIVE if b_bit else Value.INACTIVE
+                self._req.set_values({self._a_no: a_val, self._b_no: b_val})
             self._son_port = port
         except Exception as e:
             print(f"[ET RF ANAHTARI] port {port}'a geçiş başarısız: {e}")

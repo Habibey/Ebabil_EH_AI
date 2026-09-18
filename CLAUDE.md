@@ -136,29 +136,74 @@ bu repoya vendor edildi (`konum_servisi/`, `yer_istasyonu_koprusu/`).
 ```
 İHA üzerinde (Raspberry Pi 4/5):
   RTL-SDR (144-148/430-440/863-870, RF anahtarlı) ─┐
-  PlutoSDR (2.4G/5.8G, tek anten) ──────────────────┼─> streamer.py + pluto_ed_scanner.py
-  Matek FC + Here3 GPS ──────────────────────────────> mavlink_bridge.py
+  PlutoSDR RX (2.4G/5.8G, tek anten) ────────────────┼─> streamer.py + pluto_ed_scanner.py
+  Pixhawk FC + CUAV Neo 3 Pro GPS ────────────────────> mavlink_bridge.py
                                                             │ (yerel ZMQ: 5555/5556/5559/5560/5561)
                                                             v
                                               seri_telemetri_koprusu.py
                                                             │ (915MHz seri radyo, TEK hat)
                                                             v
-Yerde (Jetson Nano):                        yer_istasyonu_koprusu (C++)
-                                                            │ (ZMQ 5555/5556/5559, Ethernet)
+Yerde (Jetson Nano):  yer_istasyonu_koprusu (C++) + ai_servisi.py + et_control.py
+                      (Pluto TX de BURADA, USB ile Jetson'a DİREKT bağlı --
+                      ayrı bir ET RPi ARTIK YOK, bkz. "ET RPi kaldırıldı" notu altta)
+                                                            │ (ZMQ 5555/5556/5559/5580, Ethernet)
                                                             v
-PC/Laptop:                                          GUI_QtCreator
+PC/Laptop:            GUI_QtCreator ──ZMQ 5557──> (Jetson'daki et_control.py'ye komut, Ethernet üzerinden)
 
-ET (bağımsız, ayrı RPi + Pluto TX):
-  PC ──ZMQ 5557──> et_control.py ──> Pluto TX ──RF anahtarı──> 144-433/868-915/GNSS-1.5G Yagi+PA
+ET RF çıkışı: Pluto TX ──RF anahtarı (HMC241, A/B pinleri Jetson GPIO'sunda)──> 144-433/868-915/GNSS-1.5G/2400-2483 Yagi+PA
 ```
 
-`ai_servisi.py`, Jetson'da `yer_istasyonu_koprusu`'nun yanında AYRI bir
-Python süreci olarak çalışması PLANLANMIŞTI (REQ/REP, port 5580) -- ama
-streamer.py zaten `predict.py`'yi DOĞRUDAN (aynı süreçte, RPi'de) çağırıyor,
-bu yüzden **AI sonucu artık düz metin olarak diğer satırlarla (SYS/SPEC/DF)
-birlikte seri_telemetri_koprusu üzerinden geçiyor** -- `ai_servisi.py`/
-DATA96 ikili IQ protokolü şu an KULLANILMIYOR (kod hazır, gerekirse -- ör.
-RPi'de tflite gerçek zamanlı yetişmezse -- devreye alınabilir).
+### DONANIM DEĞİŞİKLİĞİ (2026-09-16/17): ET RPi kaldırıldı, Pluto TX + et_control.py Jetson'a taşındı
+
+2026-09-16 saha kazası sonrası donanım listesi değişti (Matek → Pixhawk, USB/`/dev/ttyACM0`;
+GPS → CUAV Neo 3 Pro, Pixhawk'a bağlı, yazılıma şeffaf -- `mavlink_bridge.py` zaten
+marka-bağımsız MAVLink konuştuğu için kod değişikliği gerekmedi). Aynı zamanda **yerde
+ayrı duran ET RPi tamamen kaldırıldı** (commit 708ffb4) -- gerekçe: Pluto TX'in RF
+çıkışı zaten RF anahtarına (HMC241) bağlanmak zorunda, ve o anahtarın A/B kontrol
+pinleri artık Jetson'a kablolu (2026-09-17'de fiziksel olarak yapıldı) -- yani Pluto
+zaten Jetson'ın yanında duracak. Pluto'nun USB'sini de PC yerine Jetson'a takmak hem
+kablo mesafesini kısaltıyor hem de PC↔Jetson arası IP forwarding/routing gibi ekstra
+ağ karmaşıklığından kaçınıyor (Pluto'nun `ip:192.168.2.1` USB-ethernet arayüzüne sadece
+doğrudan-bağlı makine erişebilir).
+
+- `scripts/baslat_jetson_koprusu.sh` artık `ai_servisi.py` + `et_control.py`'yi de
+  `yer_istasyonu_koprusu` ile birlikte başlatıyor (aynı makine, aynı script).
+- `scripts/baslat_et_rpi.sh` KALDIRILDI (artık gereksiz/dead code) -- et_control.py'nin
+  başlatılma yeri artık `baslat_jetson_koprusu.sh`.
+- **ET RF anahtarının GPIO pin numaraları Jetson'da YENİDEN DOĞRULANDI
+  (2026-09-18)** -- eski ET RPi değerleri (A=GPIO17/B=GPIO27, `/dev/gpiochip0`)
+  GEÇERSİZDİ, Jetson'ınkiyle aynı değildi. Bu Jetson'ın taşıyıcı kartı NVIDIA'nın
+  resmi Developer Kit'i DEĞİL (Jetson.GPIO import edilince "Carrier board is not
+  from a Jetson Developer Kit" uyarısı basıyor) -- bu yüzden ham gpiod chip/line
+  numarası tahmin etmek yerine, **Jetson.GPIO BOARD modu** ile doğrudan bilinen
+  fiziksel header pinleri kullanıldı: **5V=pin2, GND=pin6, A=pin11, B=pin13**.
+  Multimetre ile her 4 port seçiminde pin 11/13'teki gerilim (0V/3.3V) beklenen
+  HMC241 doğruluk tablosuyla (`A=port&1, B=(port>>1)&1`) eşleşti, DOĞRULANDI.
+  `PlutoEtRfAnahtari` bu yöntemi destekleyecek şekilde güncellendi (bkz.
+  `_init_jetson_gpio_board`, et_control.py) -- artık `EBABIL_ET_RF_SWITCH_BOARD_PINS=11,13`
+  ortam değişkeni kullanılıyor (eski `EBABIL_ET_RF_SWITCH_CHIP/HATLAR` hâlâ
+  destekleniyor ama BOARD_PINS ayarlıysa öncelikli). `scripts/baslat_jetson_koprusu.sh`
+  bu değeri zaten export ediyor. Test scripti: `scripts/test_rf_switch_jetson.py`
+  (Jetson.GPIO BOARD modu, `scripts/test_rf_switch.py`'nin ham-gpiod eşdeğeri).
+  **HENÜZ YAPILMADI**: gerçek RF/anten testi (multimetre sadece dijital mantığı
+  doğruladı, sinyalin GERÇEKTEN doğru antenden çıktığı Pluto TX + alıcı ile
+  henüz doğrulanmadı -- bkz. "SIRADAKİ ADIMLAR" listesi).
+- **Ağ planı güncellendi**: sabit-IP switch'inde artık sadece PC (`.1`) ve Jetson
+  (`.2`) var -- ET RPi (`.3`) rolü Jetson'a katıldığı için ayrı bir IP'ye gerek
+  kalmadı (aşağıdaki "Ağ/IP dersleri" notundaki ET RPi satırları artık tarihsel).
+
+**GÜNCELLEME (2026-09-18, bkz. "SAHA TESTİ" bölümü altta) -- BU PARAGRAF
+ARTIK GEÇERSİZ, KOD GERÇEKTE ŞÖYLE ÇALIŞIYOR**: AI sınıflandırması RPi'de
+DEĞİL, **Jetson'daki `ai_servisi.py`'de** yapılıyor. `predict.py`'nin modeli
+ARTIK RPi'de HİÇ yüklenmiyor (bkz. `streamer.py`'deki `handle_classify_request`
+docstring'i, "KARAR: AI Jetson'a taşındı" notu) -- RPi sadece 128 örneklik
+küçük bir IQ penceresini `"IQ,<hedef_id>,<b64>"` metin satırı olarak radyoya
+gönderiyor, `yer_istasyonu_koprusu` bunu çözüp `ai_servisi.py`'ye (aynı
+Jetson'da, ZMQ REQ/REP, `tcp://127.0.0.1:5580`) soruyor, cevabı
+`"AI,<id>,<analogSayisal>,<mod>"` olarak KENDİSİ yayınlıyor. **KRİTİK**: bu
+istek GUI'de SADECE DİNLE aktifken (5 saniyede bir, `mAiRequestTimer`)
+gönderiliyor -- GUI'de AI sınıflandırmasını tetikleyen BAŞKA HİÇBİR yol yok,
+yani AI'nin çalışması tamamen DİNLE'nin ayakta kalmasına bağlı.
 
 **DOĞRULANDI (socat sanal seri port ile)**: seri_telemetri_koprusu.py <->
 yer_istasyonu_koprusu iki yönde de (SYS satırı İHA->yer, komut yer->İHA)
@@ -175,19 +220,30 @@ tflite hızı hiç ölçülmedi).
 3. GUI'de GNSS ALDATMAYI BAŞLAT düğmesinin gerçekten `et_control.py`'ye
    komut gönderdiğini tıklayarak teyit et (kod/protokol doğrulandı, buton
    tıklaması doğrulanmadı).
-4. RPi'de `tflite_runtime` ile gerçek zamanlı sınıflandırma hızını ölç --
-   yeterince hızlıysa mimari basit kalır (yukarıdaki gibi), yavaşsa
-   `ai_servisi.py`/DATA96 IQ pencereleme hattı devreye alınmalı.
+4. ~~RPi'de `tflite_runtime` ile hız ölç~~ -- ARTIK GEÇERSİZ, AI zaten
+   Jetson'a taşındı (bkz. "SAHA TESTİ (2026-09-18)" bölümü). **YENİ ÖNCELİK
+   (KRİTİK)**: RTL-SDR'ın DİNLE sırasında segfault ile çökmesi (`LIBUSB_ERROR_OVERFLOW`
+   → kod -11) çözülmeli -- hem ses hem AI bu yüzden hiç çalışmıyor.
+   `usbfs_memory_mb` denemesi yapılıp sonucu doğrulanmalı (bkz. aynı bölüm).
 5. `EBABIL_RTL_RF_SWITCH_CHIP/HAT` -- RTL-SDR tarafının GPIO pin numarası
    HENÜZ sahada doğrulanmadı, YAPILANDIRILMAMIŞ (anten sabit kalıyor). ET
-   tarafı (`EBABIL_ET_RF_SWITCH_CHIP/HATLAR`) 2026-09-15'te DOĞRULANDI, bkz.
-   "ET RF ANAHTARI (HMC241) doğrulandı" bölümü.
+   tarafı (`EBABIL_ET_RF_SWITCH_BOARD_PINS=11,13`) Jetson'da 2026-09-18'de
+   Jetson.GPIO BOARD modu + multimetre ile YENİDEN DOĞRULANDI (bkz. "ET RF
+   anahtarının GPIO pin numaraları Jetson'da YENİDEN DOĞRULANDI" notu) --
+   SIRADA gerçek RF/anten testi var (madde 7 ile birlikte yapılabilir).
 6. İkinci bir PlutoSDR edinilince `pluto_ed_scanner.py`'yi (2400-2483/5725-5875
    MHz ED) gerçek donanımla test et.
 7. Yarışma/saha koşullarında test (antenler arası mesafe, gerçek karışma
    senaryoları, gerçek 915MHz menzil).
 
 ## SAHA DONANIM TESTLERİ (2026-09-15)
+
+**NOT (2026-09-16/17 itibarıyla TARİHSEL)**: Bu bölüm o tarihteki donanım
+düzenini (ayrı bir ET RPi ile) anlatıyor -- ET RPi sonradan kaldırıldı,
+Pluto TX + et_control.py Jetson'a taşındı (bkz. yukarıdaki "DONANIM
+DEĞİŞİKLİĞİ" notu). Aşağıdaki GPIO pin numaraları ve "ET RPi" makine
+referansları ARTIK GEÇERLİ DEĞİL, sadece o zamanki doğrulamanın kaydı
+olarak tutuluyor.
 
 Üç makine (İHA RPi, ET RPi/"yasin@ebabil", Jetson/"admim-desktop") gerçek
 donanımla (RTL-SDR, 2x PlutoSDR, Matek+GPS, 915MHz radyo, HMC241 RF switch)
@@ -250,10 +306,10 @@ ilk kez birlikte test edildi.
   `scripts/baslat_*.sh`'daki plan `192.168.50.1/2/3` -- PC/Jetson/ET RPi).
   İHA RPi bu ağa HİÇ girmiyor (915MHz radyo üzerinden, IP değil).
   Tek-komut başlatma scriptleri eklendi: `scripts/baslat_jetson_koprusu.sh`,
-  `scripts/baslat_et_rpi.sh` (bu repo), `baslat_gui.sh` (GUI_QtCreator
-  reposu) -- hepsi bu sabit IP'leri gömülü kullanıyor, env var yazmaya
-  gerek yok. Henüz gerçek bir switch ile UÇTAN UCA TEST EDİLMEDİ (switch
-  henüz temin edilmedi).
+  `baslat_gui.sh` (GUI_QtCreator reposu) -- hepsi bu sabit IP'leri gömülü
+  kullanıyor, env var yazmaya gerek yok. Henüz gerçek bir switch ile UÇTAN
+  UCA TEST EDİLMEDİ (switch henüz temin edilmedi). (`scripts/baslat_et_rpi.sh`
+  ET RPi kaldırılınca silindi -- bkz. yukarıdaki "DONANIM DEĞİŞİKLİĞİ" notu.)
 - **`et_control.py`: 4. anten portu eklendi** (2400-2483 ISM, commit 1394962)
   -- `ET_ANTEN_BANDLARI` artık 4 bant (144-433/868-915/GNSS-1.5G/2400-2483),
   Pluto TX zaten 6GHz'e kadar çıkabildiği için (`PLUTO_TX_MAX_HZ`) ek bir
@@ -294,6 +350,139 @@ edilmiş Parçacık Filtresi + EKF) kod, küçük bir ZMQ servisi
   noktalardan geçmesi şart -- bu rota tam bunu sağlamak için tasarlandı
   (4/8 yapraklı gül eğrisi denemeleri ölçülüp elenmiş, script içindeki
   yorumlarda gerekçesi var).
+
+## SAHA TESTİ (2026-09-18): ED uçtan uca hata ayıklama -- RTL-SDR çökmesi ana sorun
+
+İlk kez gerçek donanımla (İHA RPi + RTL-SDR + Pluto RX + Pixhawk, Jetson,
+PC/GUI) tam ED uçtan uca test edildi. Sinyal tespiti/parametre çıkarımı
+çalışıyor, ama DİNLE (ses) ve AI (modülasyon sınıflandırma) hiç çalışmadı --
+kök sebep bulundu, kalıcı çözüm henüz DOĞRULANMADI (bkz. son madde).
+
+### Ortam/kurulum sorunları (çözüldü)
+- **İHA RPi'de leftover systemd servisleri** (`ebabil_sdr.service` -- eski
+  ARŞİVLENMİŞ C++ portu `ebabil_test`, VE `konum_servisi.service`) arka
+  planda `auto-restart` ile sürekli çalışıp port 5555/5570'i işgal ediyordu,
+  `baslat_iha_rpi.sh` ile çakışıyordu. `sudo systemctl stop/disable
+  ebabil_sdr.service konum_servisi.service` ile durduruldu/kapatıldı. **RPi
+  SD kart değişirse/yeniden imajlanırsa bu servisler muhtemelen dönmez** ama
+  aynı RPi'de kalırsa bir daha kontrol edilmeli (`systemctl list-units --all
+  | grep -i ebabil`).
+- **İHA RPi'nin telemetri radyosu USB DEĞİL, jumper/UART ile bağlı**:
+  `/dev/ttyAMA4` (`dtoverlay=uart4` açık, `/dev/serial0`→Pixhawk'tan AYRI).
+  `EBABIL_TELEMETRI_PORT=/dev/ttyAMA4` ile veriliyor.
+- **Pluto ED (RX)'nin IP'si hiç değiştirilmemiş, fabrika varsayılanı
+  `192.168.2.1`'de kalmış** (dosyanın kendi varsayılanı `192.168.3.1`'i
+  bekliyor) -- `EBABIL_PLUTO_ED_IP=ip:192.168.2.1 python3
+  src/pluto_ed_scanner.py` ile RPi'de AYRI bir terminalde başlatılmalı
+  (`baslat_iha_rpi.sh`'a dahil DEĞİL, elle başlatılıyor).
+- **RTL-SDR'ı ÇALIŞIRKEN USB'den söküp takmak Jetson'da/RPi'de tüm USB
+  ağacını (xHCI host controller) çökertti** ("HC died; cleaning up",
+  dmesg'de görüldü) -- Pluto ve Pixhawk dahil TÜM USB cihazları aynı anda
+  kayboldu, sadece `sudo reboot` düzeltti. **DERS: sistem ÇALIŞIRKEN hiçbir
+  SDR/USB cihazını çıkarıp takmayın**, antenini test etmek istiyorsanız
+  sadece anten konektörünü (SMA/MCX) sökün, USB'ye dokunmayın.
+- **Jetson'un taşıyıcı kartı üç SDR/companion cihazı (RTL-SDR+Pluto+Pixhawk)
+  çıplak USB portlarından besliyor olabilir** -- güç bütçesi sınırlı,
+  yukarıdaki çökmenin bir nedeni bu olabilir. Sahada mümkünse **güçlü
+  (powered) bir USB hub** kullanılması öneriliyor, henüz uygulanmadı.
+- **`baslat_jetson_koprusu.sh`'da yarış durumu (race condition)**: sabit
+  `sleep 1`, Jetson Nano'da TensorFlow modelinin yüklenme süresine (birkaç
+  saniye) yetmiyordu -- `yer_istasyonu_koprusu` daha `ai_servisi.py` hazır
+  olmadan istek gönderip "AI servisine ulasilamadi/zaman asimi" basıyordu.
+  DÜZELTİLDİ: sabit sleep yerine port 5580'in gerçekten açılmasını (en fazla
+  30sn) bekleyen bir döngü eklendi.
+
+### Bant genişliği hatası bulundu ve düzeltildi (SPEC flooding)
+GUI'nin debug konsolunda ("Geçersiz SYS/SPEC paketi") sürekli bozuk/birleşmiş
+paket akışı görüldü. Kök sebep: **İZLEME (dwell) ve DİNLE modlarında SPEC
+satırı HİÇ kısıtlanmadan (her döngüde) gönderiliyordu** -- ARAMA modunda
+zaten var olan `ARAMA_SPEC_ATLAMA` kısıtlaması dwell/dinle'ye hiç
+uygulanmamıştı (kasıtlı bir tasarım kararıymış: "operatör tam o an izliyor"
+ama sahada 57600 baud hattı tıkayıp SYS/SES paketlerinin bozulmasına yol
+açtığı görüldü). `pluto_ed_scanner.py`'de durum DAHA KÖTÜYDÜ (ne ARAMA ne
+DWELL'de hiç kısıtlama yoktu). DÜZELTİLDİ:
+- `streamer.py`: `EBABIL_DWELL_SPEC_ATLAMA` (varsayılan 3) -- hem dwell hem
+  DİNLE dalındaki SPEC gönderimini kısıtlıyor.
+- `pluto_ed_scanner.py`: `EBABIL_PLUTO_ARAMA_SPEC_ATLAMA` (varsayılan 5) +
+  `EBABIL_PLUTO_DWELL_SPEC_ATLAMA` (varsayılan 3).
+Bu değişiklikler `scp` ile RPi'ye taşınıp test edildi (sahadaki asıl çökme
+sorunundan -- aşağıya bkz. -- dolayı ses/AI'nin gerçekten düzelip
+düzelmediği HENÜZ doğrulanamadı, ama "Geçersiz paketi" sıklığı azaldı).
+
+### GUI tarafında bulunan, kod DEĞİŞMEDEN bilinmesi gereken davranışlar
+- **`sescozucu.cpp`**: `streamer.py` yeniden başladığında (çökme/watchdog)
+  hedef ID numaralandırması HEDEF-1'den SIFIRLANIYOR -- GUI'nin hafızasındaki
+  eski seçim (`edSeciliHedefId`) yeni ID'lerle uyuşmazsa SES paketleri
+  SESSİZCE atılıyor (kodun kendi 2026-09-16 tarihli yorumu bunu zaten
+  öngörmüş). **Operatör kuralı: her backend yeniden başlatmasından/çökmesinden
+  sonra DİNLE'ye basmadan ÖNCE mutlaka GÜNCEL bir hedef kartına yeniden
+  tıklayın.**
+- `streamer.py`'de de AYNI mantık `DINLE_BASLAT` komutunda var (`if hedef_id
+  not in tracker.known: ... dinleme başlatılamadı`) -- bu durumda
+  `DURUM,DINLEME_AKTIF` onayı HİÇ gönderilmiyor, GUI'de "Demodülasyon:
+  başlatılıyor..." sonsuza kadar takılı kalıyor (backend'in RPi konsolundaki
+  `[!] ... bilinmiyor, dinleme başlatılamadı` satırı dışında hiçbir belirti
+  yok -- GUI ekranından anlaşılmıyor).
+
+### ASIL/KALICI SORUN -- HENÜZ ÇÖZÜLMEDİ: RTL-SDR, DİNLE sırasında segfault ile çöküyor
+DİNLE'ye basılır basılmaz RTL-SDR birkaç saniye içinde çöküyor:
+```
+rtlsdr_demod_write_reg failed with -9
+[!] ...hata (devam ediliyor): <LIBUSB_ERROR_OVERFLOW (-8)> "Could not read 125000 bytes"
+[gözcü] streamer.py kendiliğinden sonlandı (kod -11) -- yeniden başlatılıyor.
+```
+(Kod -11 = SIGSEGV, Python'un `try/except`'i YAKALAYAMIYOR -- native
+`librtlsdr`/libusb seviyesinde bir bellek sorunu.) Aynı çökme normal
+ARAMA modunda da bir kez görüldü (`LIBUSB_ERROR_IO`), yani DİNLE'ye özel
+olmayabilir ama DİNLE'nin sürekli/büyük okuması onu çok daha güvenilir
+şekilde tetikliyor. **Bu, hem DİNLE sesinin hem AI sınıflandırmasının hiç
+çalışmamasının GERÇEK kök nedeni** -- ikisi de aynı süreç ayakta kalamadığı
+için hiç tamamlanamıyor (AI'nin kendi payload'u küçük/hafif, telemetri
+bant genişliğiyle İLGİSİ YOK, sadece süreç DİNLE başlar başlamaz çöktüğü
+için hiç fırsat bulamıyor).
+
+Gözcü (`streamer_watchdog.py`) doğru şekilde yeniden başlatıyor ama her
+çökme `tracker.known`'ı sıfırlıyor (yukarıdaki hedef ID senkron sorununu
+katlıyor).
+
+**DENENECEK/ÖNERİLEN ÇÖZÜM (uygulanıp SONUÇ henüz raporlanmadı)**: RTL-SDR
+"overflow" hatası Linux'ta çok bilinen bir sorun, genelde çekirdeğin usbfs
+bellek limiti düşük olduğu için oluşuyor:
+```bash
+sudo sh -c 'echo 1000 > /sys/module/usbcore/parameters/usbfs_memory_mb'
+# kalıcı yapmak için:
+echo 'options usbcore usbfs_memory_mb=1000' | sudo tee /etc/modprobe.d/usbfs-rtlsdr.conf
+```
+Bu denenip DİNLE tekrar test edilmeli -- eğer çökme devam ederse kök sebep
+daha derin bir libusb/RPi kernel uyumsuzluğu olabilir, o zaman farklı bir
+RTL-SDR birimi/kablo/USB portu denenmeli.
+
+### Diğer bulgular
+- **146-147 MHz civarında sürekli/güçlü bir sinyal test ortamında (ev/ofis)
+  gerçekten var** -- antensiz testle DOĞRULANDI (anten çıkınca kayboldu,
+  takınca geri geldi) -- bu bir RTL-SDR birdie'si DEĞİL, gerçek bir dış
+  kaynak (yakında bir röle/PMR/IoT cihazı olabilir). Koda dışlama
+  EKLENMEDİ (yarışma alanındaki gerçek bir hedefi maskeleme riski
+  olduğu için) -- sahada muhtemelen görünmeyecek, görünürse operatör
+  bunun donanım arızası olmadığını bilmeli.
+- **PC'nin dahili ses donanımı (Realtek ALC256, kulaklık jakı dahil) fiziksel
+  olarak arızalı** görünüyor (yazılım/mixer/PipeWire tarafı tamamen sağlıklı
+  test edildi, ama hoparlörden VE kulaklıktan hiç ses çıkmadı, kulaklık jakı
+  takılınca algılanmadı bile) -- **JBL Tune 510BT Bluetooth kulaklıkla
+  atlatıldı** (eşleştirilip "trust" edildi, otomatik bağlanmalı). Yarışma
+  günü operatör istasyonunda Bluetooth kulaklık/hoparlör bulundurulmalı.
+- **Doğru çalıştırma sırası/komutları (2026-09-18 itibarıyla doğrulandı)**:
+  ```
+  İHA RPi (terminal 1): EBABIL_TELEMETRI_PORT=/dev/ttyAMA4 ./scripts/baslat_iha_rpi.sh
+  İHA RPi (terminal 2): EBABIL_PLUTO_ED_IP=ip:192.168.2.1 python3 src/pluto_ed_scanner.py
+  Jetson:                ./scripts/baslat_jetson_koprusu.sh
+  PC:                    ~/GUI_QtCreator/baslat_gui.sh
+  ```
+  **`pluto_ed_scanner.py` RPi'de çalışır, Jetson'da DEĞİL** (Pluto RX
+  fiziksel olarak RPi'ye takılı) -- bu karıştırılmamalı.
+- Telemetri protokolü baştan sona **düz metin, satır tabanlı** (virgülle
+  ayrılmış ASCII) -- ikili veri (IQ/ses) bile base64 ile metne çevrilip
+  aynı satır formatında taşınıyor, ayrı bir ikili protokol yok.
 
 ## Bilinen tuhaflıklar / geçmişten notlar
 
