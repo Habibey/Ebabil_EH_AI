@@ -124,6 +124,11 @@ def main():
     ap.add_argument("--mavlink-host", default=None, help="mavlink_bridge.py'nin UAV konumu yayınladığı host (varsayılan: EBABIL_MAVLINK_HOST ya da 127.0.0.1)")
     ap.add_argument("--mavlink-port", type=int, default=5559)
     ap.add_argument("--csv", default=None, help="Ham örneklerin yazılacağı CSV dosyası (varsayılan: kalibrasyon_<freq>MHz_<tarih-saat>.csv)")
+    ap.add_argument("--sonuc-dosya", default=None,
+                     help="Verilirse, konum_servisi'nin KAL_HESAPLA cevabını (ham 'OK,...'/'HATA,...' metni) "
+                          "ya da yetersiz-örnek durumunu ('YETERSIZ,<sayı>') bu dosyaya tek satır yazar -- "
+                          "kalibrasyon_servisi.py'nin (GUI panelinden tetiklenen otomatik akış) bu süreci "
+                          "subprocess olarak yönetip sonucu makine-okur biçimde alması için (2026-09-18 eklendi).")
     args = ap.parse_args()
 
     # konum_istemcisi.py'deki UavKonumDinleyici -- gerçek İHA GPS konumu icin.
@@ -227,18 +232,32 @@ def main():
     csv_dosya.close()
     uav_konum.durdur()
 
+    def sonuc_dosyasina_yaz(metin):
+        if not args.sonuc_dosya:
+            return
+        try:
+            with open(args.sonuc_dosya, "w") as f:
+                f.write(metin)
+        except OSError as e:
+            print(f"[KAL] UYARI: sonuç dosyası yazılamadı ({args.sonuc_dosya}): {e}")
+
     print(f"\n[KAL] Toplam {ornek_sayisi} örnek toplandı. konum_servisi'nden KAL_HESAPLA isteniyor...")
     if ornek_sayisi < 3:
         print(f"[KAL] YETERSİZ ÖRNEK ({ornek_sayisi}/3) -- kalibrasyon hesaplanamadı. Uçuşu tekrarlayıp daha fazla örnek toplayın.")
+        sonuc_dosyasina_yaz(f"YETERSIZ,{ornek_sayisi}")
         return
 
     sonuc = kalibrasyon.hesapla(band_hz)
     if sonuc is None:
         print("[KAL] HATA: konum_servisi'ne ulaşılamadı.")
+        sonuc_dosyasina_yaz("HATA,baglanti_yok")
         return
     if sonuc.startswith("HATA"):
         print(f"[KAL] Kalibrasyon başarısız: {sonuc}")
+        sonuc_dosyasina_yaz(sonuc)
         return
+
+    sonuc_dosyasina_yaz(sonuc)
 
     parcalar = sonuc.split(",")
     # OK,P0_dbm,n,rssi_residual_std,d0_m,ornek_sayisi

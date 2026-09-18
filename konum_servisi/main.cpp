@@ -60,6 +60,8 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -109,6 +111,78 @@ void enlemBoylamdanYerele(double lat_deg, double lon_deg, double lat0_deg, doubl
     x_out = (lon_deg - lon0_deg) * (PI / 180.0) * DUNYA_YARICAP_M * std::cos(lat0_deg * PI / 180.0);
 }
 
+// DISKTEN KALIBRASYON YUKLEME (2026-09-18 eklendi): testler/
+// path_loss_kalibrasyon_araci.cpp'nin urettigi <bant>mhz_ozet.txt
+// dosyalarini (basit "anahtar=deger" satirlari, "#" ile baslayan yorum
+// kismi yoksayilir) servis ACILISINDA okur ve gercek_kalibrasyonlar'a
+// onceden doldurur. Bu olmadan, RPi her yeniden baslatildiginda tum
+// bantlar "KAL_HESAPLA" o OTURUMDA calistirilana kadar demo yer tutucuya
+// (P0=-40dBm, n=2.5) dusuyordu -- sahada onceden toplanmis gercek
+// kalibrasyon, servis restart edilirse kayboluyordu.
+std::unordered_map<long long, RfKalibrasyonSonucu> kalibrasyonlariDisktenYukle(const std::string& dizin) {
+    std::unordered_map<long long, RfKalibrasyonSonucu> sonuc;
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(dizin, ec) || ec) {
+        std::cout << "[KONUM] Kalibrasyon dizini bulunamadi (" << dizin << ") - hepsi demo yer tutucuyla baslayacak.\n";
+        return sonuc;
+    }
+
+    for (const auto& girdi : fs::directory_iterator(dizin, ec)) {
+        if (ec) break;
+        if (girdi.path().extension() != ".txt") continue;
+        if (girdi.path().filename().string().find("_ozet") == std::string::npos) continue;
+
+        std::ifstream dosya(girdi.path());
+        if (!dosya) continue;
+
+        RfKalibrasyonSonucu kal;
+        double band_hz = -1.0;
+        std::string satir;
+
+        while (std::getline(dosya, satir)) {
+            const auto esit = satir.find('=');
+            if (esit == std::string::npos) continue;
+
+            const std::string anahtar = satir.substr(0, esit);
+            std::string deger_str = satir.substr(esit + 1);
+
+            // "  # aciklama" kuyruklarini at.
+            const auto yorum = deger_str.find('#');
+            if (yorum != std::string::npos) deger_str = deger_str.substr(0, yorum);
+
+            double deger = 0.0;
+            try {
+                deger = std::stod(deger_str);
+            } catch (...) {
+                continue;
+            }
+
+            if (anahtar == "band_hz") band_hz = deger;
+            else if (anahtar == "P0_dbm") kal.P0_dbm = deger;
+            else if (anahtar == "n") kal.n = deger;
+            else if (anahtar == "sigma2_rssi") kal.sigma2_rssi = deger;
+            else if (anahtar == "rssi_residual_std") kal.rssi_residual_std = deger;
+            else if (anahtar == "sigma_mesafe_katsayisi") kal.sigma_mesafe_katsayisi = deger;
+            else if (anahtar == "govde_ek_varyans_db2") kal.govde_ek_varyans_db2 = deger;
+            else if (anahtar == "elektronik_taban_gurultu_dbm") kal.elektronik_taban_gurultu_dbm = deger;
+        }
+
+        if (band_hz <= 0.0) {
+            std::cout << "[KONUM] UYARI: " << girdi.path() << " icinde gecerli band_hz yok, atlandi.\n";
+            continue;
+        }
+
+        kal.valid = true;
+        sonuc[bandAnahtari(band_hz)] = kal;
+        std::cout << "[KONUM] Diskten kalibrasyon yuklendi: " << (band_hz / 1e6) << " MHz"
+                  << " (P0=" << kal.P0_dbm << "dBm, n=" << kal.n << ") <- " << girdi.path() << "\n";
+    }
+
+    return sonuc;
+}
+
 void yerelden_enlem_boylama(double x_dogu_m, double y_kuzey_m, double lat0_deg, double lon0_deg,
                              double& lat_out, double& lon_out) {
     lat_out = lat0_deg + (y_kuzey_m / DUNYA_YARICAP_M) * (180.0 / PI);
@@ -134,7 +208,8 @@ int main() {
     // gercek_kalibrasyonlar doluysa (KAL_HESAPLA basariyla calistiysa) yeni
     // hedefler artik demo yer tutucu yerine BUNU kullanir.
     std::unordered_map<long long, std::vector<KalibrasyonOrnegi>> kalibrasyon_ornekleri;
-    std::unordered_map<long long, RfKalibrasyonSonucu> gercek_kalibrasyonlar;
+    std::unordered_map<long long, RfKalibrasyonSonucu> gercek_kalibrasyonlar =
+        kalibrasyonlariDisktenYukle(ortamMetin("EBABIL_KAL_CIKTI_DIZINI", "kalibrasyon/rssi_mesafe_kalibrasyonu"));
 
     zmq::context_t ctx(1);
     zmq::socket_t rep(ctx, zmq::socket_type::rep);
